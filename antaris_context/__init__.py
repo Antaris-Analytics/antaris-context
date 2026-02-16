@@ -1,0 +1,34 @@
+"""
+Antaris Context - Zero-dependency context window optimization for AI agents.
+
+A lightweight Python library for managing context windows, token budgets,
+and message compression in AI agent applications.
+"""
+
+from .manager import ContextManager
+from .window import ContextWindow
+from .compressor import MessageCompressor
+from .strategy import (
+    ContextStrategy,
+    RecencyStrategy,
+    RelevanceStrategy,
+    HybridStrategy,
+    BudgetStrategy
+)
+from .profiler import ContextProfiler
+
+__version__ = "0.1.0"
+__author__ = "Antaris Analytics"
+__license__ = "Apache 2.0"
+
+__all__ = [
+    "ContextManager",
+    "ContextWindow", 
+    "MessageCompressor",
+    "ContextStrategy",
+    "RecencyStrategy",
+    "RelevanceStrategy",
+    "HybridStrategy",
+    "BudgetStrategy",
+    "ContextProfiler"
+]
