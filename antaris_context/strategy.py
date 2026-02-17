@@ -112,10 +112,10 @@ class RelevanceStrategy(ContextStrategy):
         
         # Score each content item by relevance
         scored_content = []
-        query_keywords = self._extract_keywords(query)
+        query_keywords = self.extract_keywords(query)
         
         for item in available_content:
-            relevance_score = self._calculate_relevance(item, query_keywords)
+            relevance_score = self.calculate_relevance(item, query_keywords)
             priority_multiplier = self.priority_multipliers.get(item.get('priority', 'normal'), 1.0)
             final_score = relevance_score * priority_multiplier
             
@@ -141,8 +141,8 @@ class RelevanceStrategy(ContextStrategy):
         
         return selected
     
-    def _extract_keywords(self, query: str) -> Set[str]:
-        """Extract keywords from query."""
+    def extract_keywords(self, query: str) -> Set[str]:
+        """Extract keywords from query for relevance scoring."""
         # Simple word extraction - could be enhanced with stemming, etc.
         if not self.case_sensitive:
             query = query.lower()
@@ -156,8 +156,8 @@ class RelevanceStrategy(ContextStrategy):
         
         return keywords
     
-    def _calculate_relevance(self, item: Dict, query_keywords: Set[str]) -> float:
-        """Calculate relevance score for an item."""
+    def calculate_relevance(self, item: Dict, query_keywords: Set[str]) -> float:
+        """Calculate relevance score for an item against query keywords."""
         content = item.get('content', '')
         if not content or not query_keywords:
             return 0.0
@@ -261,8 +261,8 @@ class HybridStrategy(ContextStrategy):
             # Relevance score (from relevance strategy)
             relevance_score = 0
             if query:
-                query_keywords = self.relevance_strategy._extract_keywords(query)
-                relevance_score = self.relevance_strategy._calculate_relevance(item, query_keywords)
+                query_keywords = self.relevance_strategy.extract_keywords(query)
+                relevance_score = self.relevance_strategy.calculate_relevance(item, query_keywords)
             
             # Priority boost
             priority_multiplier = self.relevance_strategy.priority_multipliers.get(

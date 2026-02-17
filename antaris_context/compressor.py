@@ -305,25 +305,20 @@ class MessageCompressor:
         if len(sentences) <= 3:  # Keep very short texts intact
             return text
         
-        # Score sentences by importance
+        # Score sentences by importance, tracking original index
         sentence_scores = []
         for i, sentence in enumerate(sentences):
             score = self._score_sentence_importance(sentence, i, len(sentences))
-            sentence_scores.append((score, sentence))
+            sentence_scores.append((score, i, sentence))
         
         # Sort by score (highest first) and select top sentences
         sentence_scores.sort(key=lambda x: x[0], reverse=True)
         target_count = max(1, int(len(sentences) * target_ratio))
-        selected_sentences = sentence_scores[:target_count]
+        selected = sentence_scores[:target_count]
         
-        # Sort selected sentences back to original order
-        selected_with_index = []
-        for score, sentence in selected_sentences:
-            original_index = sentences.index(sentence)
-            selected_with_index.append((original_index, sentence))
-        
-        selected_with_index.sort(key=lambda x: x[0])
-        return ' '.join(sentence[1] for sentence in selected_with_index)
+        # Restore original order by index
+        selected.sort(key=lambda x: x[1])
+        return ' '.join(s[2] for s in selected)
     
     def _split_sentences(self, text: str) -> List[str]:
         """Split text into sentences."""

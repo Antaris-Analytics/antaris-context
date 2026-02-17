@@ -100,7 +100,7 @@ class ContextWindow:
             
         section_data = self.sections[section]
         if section_data['budget'] == 0:
-            return 0.0 if section_data['used'] == 0 else float('inf')
+            return 0.0 if section_data['used'] == 0 else 1.0
         return section_data['used'] / section_data['budget']
         
     def get_usage_report(self) -> Dict:
@@ -200,7 +200,7 @@ class ContextWindow:
         """
         if not text:
             return 0
-        return max(1, len(text.strip()) // 4)
+        return max(1, len(text) // 4)
         
     def to_json(self) -> str:
         """Serialize window state to JSON."""
@@ -227,5 +227,6 @@ class ContextWindow:
         for section_name, section_data in data['sections'].items():
             if section_name in window.sections:
                 window.sections[section_name]['budget'] = section_data['budget']
+                window.sections[section_name]['used'] = section_data.get('used', 0)
                 
         return window

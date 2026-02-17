@@ -530,25 +530,37 @@ class ContextManager:
         tokens_removed = 0
         priority_order = ['optional', 'normal', 'important']  # Never remove critical
         
+        # Collect all removal candidates across sections
+        candidates = []
         for priority in priority_order:
+            for section_name, section_data in self.window.sections.items():
+                for item in section_data['content']:
+                    if item.get('priority', 'normal') == priority:
+                        candidates.append({
+                            'section': section_name,
+                            'item': item,
+                            'priority': priority,
+                            'tokens': item.get('tokens', 0)
+                        })
+        
+        # Mark items for removal until budget met
+        items_to_remove = []
+        for candidate in candidates:
             if tokens_removed >= tokens_to_remove:
                 break
-            
-            for section_name, section_data in self.window.sections.items():
-                items_to_remove = []
-                for i, item in enumerate(section_data['content']):
-                    if item.get('priority', 'normal') == priority:
-                        items_to_remove.append((i, item))
-                
-                # Remove items (reverse order to maintain indices)
-                for i, item in reversed(items_to_remove):
-                    if tokens_removed >= tokens_to_remove:
-                        break
-                    
-                    section_data['content'].pop(i)
-                    removed_tokens = item.get('tokens', 0)
-                    section_data['used'] -= removed_tokens
-                    tokens_removed += removed_tokens
+            items_to_remove.append(candidate)
+            tokens_removed += candidate['tokens']
+        
+        # Rebuild section content lists in a single pass
+        remove_set = {id(c['item']) for c in items_to_remove}
+        for section_name, section_data in self.window.sections.items():
+            new_content = []
+            for item in section_data['content']:
+                if id(item) in remove_set:
+                    section_data['used'] -= item.get('tokens', 0)
+                else:
+                    new_content.append(item)
+            section_data['content'] = new_content
         
         return tokens_removed
     
@@ -682,7 +694,7 @@ class ContextManager:
         if not suggestions:
             return False
         
-        if auto_apply or suggestions['potential_savings'] > 100:  # Auto-apply if significant savings
+        if auto_apply:
             for section, budget in suggestions['suggested_budgets'].items():
                 self.set_section_budget(section, budget)
             return True
@@ -690,13 +702,17 @@ class ContextManager:
         return False
     
     def cascade_overflow(self, source_section: str) -> int:
-        """Redistribute overflow from one section to others with available budget.
+        """Reallocate unused budget slack from other sections to cover overflow.
+        
+        This transfers budget allocation (not content) from sections that have
+        unused capacity to the overflowing section. Only takes from slack
+        (budget - used), never displaces existing content.
         
         Args:
             source_section: Section that is over budget
             
         Returns:
-            Amount of tokens successfully redistributed
+            Amount of budget tokens successfully reallocated
         """
         if source_section not in self.window.sections:
             return 0

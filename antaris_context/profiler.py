@@ -4,6 +4,7 @@ Context profiler for analyzing usage patterns and optimization suggestions.
 
 from typing import Dict, List, Optional, Tuple
 import json
+import re
 import time
 from datetime import datetime
 import os
@@ -401,7 +402,7 @@ class ContextProfiler:
         whitespace_chars = len(content) - len(content.strip())
         
         # Count excessive whitespace
-        import re
+        # re imported at module level
         excessive_whitespace = len(re.findall(r'\s{2,}', content)) * 2  # Approximate
         
         return (whitespace_chars + excessive_whitespace) / total_chars
@@ -480,5 +481,5 @@ class ContextProfiler:
         try:
             dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
             return dt.timestamp()
-        except:
+        except (ValueError, AttributeError, TypeError):
             return 0.0

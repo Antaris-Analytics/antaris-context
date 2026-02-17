@@ -5,7 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.0] - 2025-02-16
+## [1.0.1] - 2026-02-17
+
+### Fixed (Claude Review Round 1)
+- **🔴 Sentence selection O(n²) dedup bug** — `_smart_sentence_selection` used `list.index()` which returns first occurrence for duplicates, corrupting order. Now tracks original index from the start.
+- **🔴 `_truncate_lowest_priority` mutation during iteration** — inner loop mutated lists while outer priority loop continued, risking over-removal. Rewritten to collect candidates first, then rebuild in a single pass.
+- **🔴 `apply_adaptive_reallocation` ignored `auto_apply=False`** — would auto-apply when `potential_savings > 100` regardless of flag. Now strictly respects the parameter.
+- **🟡 `_estimate_tokens` stripped whitespace** before counting — whitespace consumes tokens. Removed `.strip()`.
+- **🟡 `from_json` didn't restore `used` counts** — deserialization silently dropped usage data. Now restores `used` for roundtrip fidelity.
+- **🟡 `get_section_utilization` returned `float('inf')`** for zero-budget sections with content — now returns `1.0`.
+- **🟡 `HybridStrategy` used private `_extract_keywords`/`_calculate_relevance`** — promoted to public API on `RelevanceStrategy` to decouple implementations.
+- **🟢 Bare `except:` in profiler** `_parse_timestamp` — narrowed to `(ValueError, AttributeError, TypeError)`.
+- **🟢 `re` import** in profiler moved from function-level to module-level.
+
+### Improved (Claude Review Round 1)
+- **`cascade_overflow` docstring** clarified: transfers unused budget slack only, never displaces content.
+- 21 new tests covering cascade overflow, snapshots, adaptive budgets, templates, sentence dedup regression, `from_json` roundtrip, utilization bounds.
+- **77 tests total** (up from 56).
+
+## [1.0.0] - 2026-02-16
 
 ### 🎉 Major Release - Production Ready
 

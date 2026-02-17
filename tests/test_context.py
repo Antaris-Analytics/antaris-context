@@ -777,5 +777,201 @@ class TestIntegration:
         assert stats['bytes_saved'] > 0
 
 
+class TestCascadeOverflow:
+    """Test cascade_overflow budget reallocation."""
+
+    def test_cascade_basic(self):
+        manager = ContextManager(total_budget=8000)
+        manager.set_section_budget('system', 1000)
+        manager.set_section_budget('memory', 2000)
+        manager.set_section_budget('conversation', 200)  # Tiny budget
+        manager.set_section_budget('tools', 1000)
+        # Add content that overflows the small budget (bypass compression)
+        manager.add_content('conversation', 'word ' * 500, priority='normal', compress=False)
+        assert manager.window.sections['conversation']['used'] > manager.window.sections['conversation']['budget']
+        redistributed = manager.cascade_overflow('conversation')
+        assert redistributed > 0
+        assert manager.window.sections['conversation']['budget'] > 200
+
+    def test_cascade_no_overflow(self):
+        manager = ContextManager(total_budget=8000)
+        manager.set_section_budget('conversation', 4000)
+        manager.add_content('conversation', 'small text')
+        redistributed = manager.cascade_overflow('conversation')
+        assert redistributed == 0
+
+    def test_cascade_no_slack(self):
+        manager = ContextManager(total_budget=8000)
+        for section in ['system', 'memory', 'conversation', 'tools']:
+            manager.set_section_budget(section, 2000)
+            manager.add_content(section, 'x' * 2500)
+        redistributed = manager.cascade_overflow('conversation')
+        assert redistributed == 0
+
+    def test_cascade_invalid_section(self):
+        manager = ContextManager()
+        assert manager.cascade_overflow('nonexistent') == 0
+
+
+class TestSnapshots:
+    """Test save/restore snapshot functionality."""
+
+    def test_save_and_restore(self):
+        manager = ContextManager(total_budget=8000)
+        manager.set_section_budget('system', 1000)
+        manager.add_content('system', 'system prompt here')
+        manager.save_snapshot('checkpoint1')
+        
+        # Modify state
+        manager.clear_section('system')
+        assert manager.window.sections['system']['used'] == 0
+        
+        # Restore
+        restored = manager.restore_snapshot('checkpoint1')
+        assert restored is True
+
+    def test_restore_nonexistent(self):
+        manager = ContextManager()
+        assert manager.restore_snapshot('nope') is False
+
+    def test_list_snapshots(self):
+        manager = ContextManager()
+        assert manager.list_snapshots() == []
+        manager.save_snapshot('snap1')
+        manager.save_snapshot('snap2')
+        snapshots = manager.list_snapshots()
+        assert len(snapshots) == 2
+        names = [s['name'] for s in snapshots]
+        assert 'snap1' in names
+        assert 'snap2' in names
+
+    def test_multiple_save_overwrite(self):
+        manager = ContextManager()
+        manager.save_snapshot('test')
+        manager.save_snapshot('test')  # Overwrite
+        assert len(manager.list_snapshots()) == 1
+
+
+class TestAdaptiveBudgets:
+    """Test adaptive budget management."""
+
+    def test_enable_disable(self):
+        manager = ContextManager()
+        manager.enable_adaptive_budgets(True, reallocation_threshold=0.4)
+        assert manager.config['adaptive_budgets']['enabled'] is True
+        assert manager.config['adaptive_budgets']['reallocation_threshold'] == 0.4
+        manager.enable_adaptive_budgets(False)
+        assert manager.config['adaptive_budgets']['enabled'] is False
+
+    def test_track_usage(self):
+        manager = ContextManager()
+        manager.enable_adaptive_budgets(True)
+        manager.set_section_budget('system', 1000)
+        manager.add_content('system', 'test content')
+        manager.track_usage()
+        history = manager.config['adaptive_budgets']['usage_history']
+        assert len(history) == 1
+        assert 'section_usage' in history[0]
+
+    def test_track_usage_disabled(self):
+        manager = ContextManager()
+        manager.track_usage()  # Should be no-op
+        assert len(manager.config['adaptive_budgets']['usage_history']) == 0
+
+    def test_suggest_needs_data(self):
+        manager = ContextManager()
+        manager.enable_adaptive_budgets(True)
+        result = manager.suggest_adaptive_reallocation()
+        assert result is None  # Not enough data
+
+    def test_auto_apply_respects_flag(self):
+        """auto_apply=False should never apply, regardless of savings."""
+        manager = ContextManager()
+        manager.enable_adaptive_budgets(True)
+        # Populate enough history
+        manager.set_section_budget('system', 1000)
+        manager.set_section_budget('memory', 2000)
+        for _ in range(15):
+            manager.track_usage()
+        result = manager.apply_adaptive_reallocation(auto_apply=False)
+        assert result is False
+
+
+class TestTemplates:
+    """Test section template functionality."""
+
+    def test_apply_template(self):
+        manager = ContextManager()
+        manager.apply_template('chatbot')
+        assert manager.window.sections['system']['budget'] == 800
+        assert manager.window.sections['conversation']['budget'] == 5000
+
+    def test_apply_invalid_template(self):
+        manager = ContextManager()
+        with pytest.raises(ValueError):
+            manager.apply_template('nonexistent')
+
+    def test_get_available_templates(self):
+        templates = ContextManager.get_available_templates()
+        assert 'chatbot' in templates
+        assert 'agent_with_tools' in templates
+        assert 'rag_pipeline' in templates
+        assert 'code_assistant' in templates
+        assert 'balanced' in templates
+
+    def test_template_budgets_sum_to_8000(self):
+        templates = ContextManager.get_available_templates()
+        for name, budgets in templates.items():
+            assert sum(budgets.values()) == 8000, f"{name} sums to {sum(budgets.values())}"
+
+    def test_template_via_constructor(self):
+        manager = ContextManager(template='rag_pipeline')
+        assert manager.window.sections['conversation']['budget'] == 4500
+
+
+class TestSmartSentenceDuplicates:
+    """Regression test for sentence dedup bug (#1)."""
+
+    def test_duplicate_sentences_preserve_order(self):
+        compressor = MessageCompressor('aggressive')
+        # Text with duplicate sentences
+        text = ("Important first sentence. " 
+                "Some filler content here. "
+                "Some filler content here. "  # Duplicate
+                "Critical ending statement with numbers 42.")
+        result = compressor.compress(text)
+        # Should not crash or produce garbled output
+        assert len(result) > 0
+        # First sentence should still come before ending
+        if "Important" in result and "Critical" in result:
+            assert result.index("Important") < result.index("Critical")
+
+
+class TestFromJsonRestoresUsed:
+    """Regression test for from_json not restoring used counts (#6)."""
+
+    def test_from_json_restores_used(self):
+        window = ContextWindow(8000)
+        window.set_section_budget('system', 1000)
+        window.add_content('system', 'test content')
+        used_before = window.sections['system']['used']
+        
+        json_str = window.to_json()
+        restored = ContextWindow.from_json(json_str)
+        assert restored.sections['system']['used'] == used_before
+
+
+class TestUtilizationNeverInf:
+    """Regression test for get_section_utilization returning inf (#12)."""
+
+    def test_zero_budget_with_content(self):
+        window = ContextWindow(8000)
+        # Budget is 0 but force some used tokens
+        window.sections['system']['used'] = 100
+        util = window.get_section_utilization('system')
+        assert util == 1.0  # Not inf
+        assert util != float('inf')
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
