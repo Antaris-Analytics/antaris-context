@@ -851,6 +851,21 @@ class TestSnapshots:
         manager.save_snapshot('test')  # Overwrite
         assert len(manager.list_snapshots()) == 1
 
+    def test_snapshot_does_not_restore_content(self):
+        """Snapshots are structural only — content is NOT preserved."""
+        manager = ContextManager(total_budget=8000)
+        manager.set_section_budget('system', 1000)
+        manager.add_content('system', 'important system prompt', compress=False)
+        assert len(manager.window.sections['system']['content']) > 0
+        
+        manager.save_snapshot('with_content')
+        manager.clear_all_content()
+        
+        restored = manager.restore_snapshot('with_content')
+        assert restored is True
+        # Structural state restored but content is empty
+        assert manager.window.sections['system']['content'] == []
+
 
 class TestAdaptiveBudgets:
     """Test adaptive budget management."""

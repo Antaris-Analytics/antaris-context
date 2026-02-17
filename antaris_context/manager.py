@@ -749,7 +749,12 @@ class ContextManager:
         return redistributed
     
     def save_snapshot(self, name: str) -> None:
-        """Save a snapshot of the current context state.
+        """Save a structural snapshot of the current context state.
+        
+        Captures configuration, section budgets, usage counts, and strategy.
+        Does NOT serialize section content — snapshots are lightweight
+        structural checkpoints. After restore, section budgets and used
+        counts are restored but content lists will be empty.
         
         Args:
             name: Name for the snapshot
@@ -768,7 +773,12 @@ class ContextManager:
         self._snapshots[name] = snapshot
     
     def restore_snapshot(self, name: str) -> bool:
-        """Restore context from a saved snapshot.
+        """Restore structural state from a saved snapshot.
+        
+        Restores configuration, section budgets, and strategy settings.
+        Content is NOT restored — only structural state is preserved in
+        snapshots. After restore, used counts reflect the snapshot but
+        content lists will be empty.
         
         Args:
             name: Name of the snapshot to restore

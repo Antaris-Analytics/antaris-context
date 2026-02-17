@@ -459,7 +459,11 @@ class ContextProfiler:
         return improvements
     
     def _log_analysis(self, report: Dict) -> None:
-        """Log analysis to file."""
+        """Log analysis to file (append mode).
+        
+        Note: Uses append mode, not atomic write. Log entries may be
+        incomplete if the process is interrupted mid-write.
+        """
         if not self.log_file:
             return
         
