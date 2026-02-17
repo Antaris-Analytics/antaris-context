@@ -18,7 +18,7 @@ from .strategy import (
 from .profiler import ContextProfiler
 from .utils import atomic_write_json
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 __author__ = "Antaris Analytics"
 __license__ = "Apache 2.0"
 

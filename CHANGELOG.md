@@ -5,9 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.1] - 2026-02-16
+## [1.1.0] - 2026-02-16
 
-### Fixed (Claude Review Round 1)
+### Fixed (Claude Review Round 1 + Round 2, GPT-5.2 verified)
 - **🔴 Sentence selection O(n²) dedup bug** — `_smart_sentence_selection` used `list.index()` which returns first occurrence for duplicates, corrupting order. Now tracks original index from the start.
 - **🔴 `_truncate_lowest_priority` mutation during iteration** — inner loop mutated lists while outer priority loop continued, risking over-removal. Rewritten to collect candidates first, then rebuild in a single pass.
 - **🔴 `apply_adaptive_reallocation` ignored `auto_apply=False`** — would auto-apply when `potential_savings > 100` regardless of flag. Now strictly respects the parameter.
@@ -18,10 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **🟢 Bare `except:` in profiler** `_parse_timestamp` — narrowed to `(ValueError, AttributeError, TypeError)`.
 - **🟢 `re` import** in profiler moved from function-level to module-level.
 
-### Improved (Claude Review Round 1)
+### Improved (Claude Review Round 1 + 2)
 - **`cascade_overflow` docstring** clarified: transfers unused budget slack only, never displaces content.
-- 21 new tests covering cascade overflow, snapshots, adaptive budgets, templates, sentence dedup regression, `from_json` roundtrip, utilization bounds.
-- **77 tests total** (up from 56).
+- **Snapshot docstrings** corrected: structural-only checkpoints, content not preserved.
+- **`_log_analysis` docstring** notes append-mode crash risk.
+- 22 new tests covering cascade overflow, snapshots (including content non-preservation), adaptive budgets, templates, sentence dedup regression, `from_json` roundtrip, utilization bounds.
+- **78 tests total** (up from 56).
 
 ## [1.0.0] - 2026-02-16
 
