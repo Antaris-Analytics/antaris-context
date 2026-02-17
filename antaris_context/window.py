@@ -183,7 +183,20 @@ class ContextWindow:
     def _estimate_tokens(self, text: str) -> int:
         """Estimate token count using character-based approximation.
         
-        Rough approximation: ~4 characters per token for English text.
+        IMPORTANT LIMITATION: This uses a simple character-based approximation
+        of ~4 characters per token for English text. This is NOT accurate for 
+        all providers or languages.
+        
+        For production use, consider implementing provider-aware token counting
+        using actual tokenizer libraries (e.g., tiktoken for OpenAI, transformers
+        for HuggingFace models, etc.). The current approximation is sufficient
+        for basic budget planning but will not match exact provider counts.
+        
+        Args:
+            text: Text to estimate tokens for
+            
+        Returns:
+            Estimated token count (minimum 1 for non-empty text)
         """
         if not text:
             return 0

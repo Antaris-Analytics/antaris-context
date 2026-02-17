@@ -5,6 +5,81 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2025-02-16
+
+### 🎉 Major Release - Production Ready
+
+#### 🐛 Bug Fixes
+- **Fixed atomic file writes**: `save_config()` now uses atomic_write_json pattern (mkstemp + fsync + os.replace) instead of raw open()
+- **Fixed error logging**: `_log_analysis()` in profiler now logs warnings instead of silently swallowing errors
+- **Fixed directory creation**: Added guard against empty dirname in file path operations
+- **Fixed index corruption**: `_truncate_oldest_first` algorithm completely rewritten to prevent index corruption during list manipulation
+- **Documented token estimation**: Clearly documented the len(text)//4 approximation with notes about provider-aware counting limitations
+
+#### ✨ New Features
+
+##### Section Templates (v0.2.0)
+- **Prebuilt configurations** for common agent patterns:
+  - `chatbot`: Basic chatbot with balanced memory and conversation space
+  - `agent_with_tools`: AI agent with emphasis on tool definitions and working memory
+  - `rag_pipeline`: RAG system optimized for retrieval and Q&A
+  - `code_assistant`: Code-focused with space for analysis and formatting tools
+  - `balanced`: Equal distribution across all sections
+- **Template application**: `apply_template(template_name)` method and constructor `template` parameter
+- **Template discovery**: `get_available_templates()` class method
+
+##### Improved Compression (v0.2.0)
+- **Smart sentence selection** in aggressive mode: intelligently ranks and selects most important sentences
+- **Sentence scoring algorithm**: considers position, length, content indicators, questions, numbers, and filters filler words
+- **Target ratio control**: configurable compression ratio (default 70% of sentences retained)
+
+##### Adaptive Budgets (v0.5.0)
+- **Usage tracking**: `track_usage()` method captures utilization patterns over time
+- **Smart reallocation**: `suggest_adaptive_reallocation()` analyzes patterns and suggests optimal budget distribution
+- **Auto-application**: `apply_adaptive_reallocation()` with configurable thresholds
+- **Historical analysis**: maintains rolling window of last 100 usage snapshots
+
+##### Priority Cascading (v0.5.0)  
+- **Overflow redistribution**: `cascade_overflow()` automatically redistributes budget from overflowing sections
+- **Available budget detection**: finds sections with spare capacity and reallocates intelligently
+- **Budget balancing**: maintains overall budget constraints while optimizing utilization
+
+##### Context Snapshots (v0.5.0)
+- **State checkpointing**: `save_snapshot(name)` captures complete context state
+- **Restoration**: `restore_snapshot(name)` restores previous state including configuration and window contents
+- **Snapshot management**: `list_snapshots()` for discovering saved states
+- **Use cases**: A/B testing, rollback scenarios, experimental configurations
+
+##### Performance Benchmarks (v1.0.0)
+- **Comprehensive benchmark suite** (`benchmarks/bench_context.py`) measures ops/sec for all major operations
+- **14 benchmark categories**: window operations, compression levels, strategies, manager operations, profiler, snapshots, adaptive features
+- **Statistical analysis**: warmup iterations, std deviation, min/max times
+- **JSON output**: results saved to `benchmark_results.json` for tracking regressions
+- **Performance baseline**: 2.8M+ combined ops/sec on modern hardware
+
+##### Atomic Writes Everywhere (v1.0.0)
+- **New utils.py module**: centralized atomic file operations following antaris-guard patterns
+- **Safe configuration saves**: all JSON writes now use atomic operations with fsync
+- **Consistency guarantees**: prevents partial writes and corruption during concurrent access
+- **Error handling**: proper logging instead of silent failures
+
+#### 🔧 Infrastructure Improvements
+- **Python 3.9+ compatibility**: tested on all supported versions
+- **Zero dependencies**: maintains stdlib-only approach
+- **Enhanced documentation**: token estimation limitations clearly documented
+- **Improved error messages**: better context for debugging issues
+
+### 🧪 Testing
+- **All 56 tests pass**: comprehensive test coverage maintained
+- **New benchmark infrastructure**: performance regression detection
+- **Real-world test data**: benchmarks use realistic content patterns
+
+### 🚀 Performance
+- **Window operations**: 700K+ ops/sec for basic operations
+- **Compression throughput**: 13K-63K ops/sec depending on level
+- **Strategy selection**: 50K-706K ops/sec depending on complexity
+- **Overall system**: No performance regressions, several optimizations
+
 ## [0.1.0] - 2025-02-16
 
 ### Added

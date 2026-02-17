@@ -7,6 +7,9 @@ import json
 import time
 from datetime import datetime
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class ContextProfiler:
@@ -461,14 +464,16 @@ class ContextProfiler:
         
         try:
             # Ensure directory exists
-            os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
+            dir_path = os.path.dirname(self.log_file)
+            if dir_path:  # Guard against empty dirname
+                os.makedirs(dir_path, exist_ok=True)
             
             # Append to log file
             with open(self.log_file, 'a') as f:
                 f.write(json.dumps(report) + '\n')
         except Exception as e:
-            # Silently fail - don't break the application
-            pass
+            # Log the error instead of silently swallowing it
+            logger.warning("Failed to log analysis to %s: %s", self.log_file, e)
     
     def _parse_timestamp(self, timestamp_str: str) -> float:
         """Parse ISO timestamp to Unix timestamp."""

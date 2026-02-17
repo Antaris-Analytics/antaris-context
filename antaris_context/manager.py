@@ -5,21 +5,58 @@ Main context manager for coordinating context window optimization.
 from typing import Dict, List, Optional, Any, Union
 import json
 import os
+import time
 from .window import ContextWindow
 from .compressor import MessageCompressor
 from .strategy import ContextStrategy, RecencyStrategy, RelevanceStrategy, HybridStrategy, BudgetStrategy
 from .profiler import ContextProfiler
+from .utils import atomic_write_json
 
 
 class ContextManager:
     """Main class for managing context windows, budgets, and optimization strategies."""
     
-    def __init__(self, total_budget: int = 8000, config_file: Optional[str] = None):
+    # Section templates for common agent patterns
+    SECTION_TEMPLATES = {
+        'chatbot': {
+            'system': 800,    # Basic system prompt
+            'memory': 1500,   # Recent conversation memory
+            'conversation': 5000,  # Active conversation
+            'tools': 700     # Tool definitions
+        },
+        'agent_with_tools': {
+            'system': 1200,   # System prompt + agent instructions
+            'memory': 2000,   # Working memory and state
+            'conversation': 3500,  # User interactions
+            'tools': 1300     # Tool definitions and examples
+        },
+        'rag_pipeline': {
+            'system': 600,    # Simple system prompt
+            'memory': 1000,   # Search queries and context
+            'conversation': 4500,  # Q&A conversation
+            'tools': 1900     # RAG tools and retrieval results  
+        },
+        'code_assistant': {
+            'system': 1000,   # Coding guidelines and style
+            'memory': 1800,   # Recent code context
+            'conversation': 4000,  # Code discussion
+            'tools': 1200     # Code analysis and formatting tools
+        },
+        'balanced': {
+            'system': 1000,   # Equal-ish distribution
+            'memory': 2000,   
+            'conversation': 4000,
+            'tools': 1000
+        }
+    }
+    
+    def __init__(self, total_budget: int = 8000, config_file: Optional[str] = None, template: Optional[str] = None):
         """Initialize context manager.
         
         Args:
             total_budget: Total token budget for context window
             config_file: Optional JSON configuration file path
+            template: Optional section template ('chatbot', 'agent_with_tools', 'rag_pipeline', etc.)
         """
         self.total_budget = total_budget
         self.config_file = config_file
@@ -28,7 +65,14 @@ class ContextManager:
         self.strategy = HybridStrategy()  # Default strategy
         self.profiler = ContextProfiler()
         
-        # Default configuration
+        # Default configuration - apply template if provided
+        default_budgets = self.SECTION_TEMPLATES.get(template, {
+            'system': 1000,
+            'memory': 2000,
+            'conversation': 4000,
+            'tools': 1000
+        })
+        
         self.config = {
             'compression_level': 'moderate',
             'strategy': 'hybrid',
@@ -36,15 +80,16 @@ class ContextManager:
                 'recency_weight': 0.4,
                 'relevance_weight': 0.6
             },
-            'section_budgets': {
-                'system': 1000,
-                'memory': 2000,
-                'conversation': 4000,
-                'tools': 1000
-            },
+            'section_budgets': default_budgets.copy(),
             'truncation_strategy': 'oldest_first',
             'auto_compress': True,
-            'profiler_log_file': None
+            'profiler_log_file': None,
+            'template': template,  # Store template for reference
+            'adaptive_budgets': {
+                'enabled': False,
+                'usage_history': [],
+                'reallocation_threshold': 0.3
+            }
         }
         
         # Load configuration if file provided
@@ -81,11 +126,30 @@ class ContextManager:
             raise ValueError("No configuration file path specified")
         
         try:
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            with open(save_path, 'w') as f:
-                json.dump(self.config, f, indent=2)
+            atomic_write_json(save_path, self.config, indent=2)
         except Exception as e:
             raise ValueError(f"Failed to save configuration to {save_path}: {e}")
+    
+    def apply_template(self, template_name: str) -> None:
+        """Apply a section template to current configuration.
+        
+        Args:
+            template_name: Template name ('chatbot', 'agent_with_tools', etc.)
+        """
+        if template_name not in self.SECTION_TEMPLATES:
+            available = list(self.SECTION_TEMPLATES.keys())
+            raise ValueError(f"Unknown template '{template_name}'. Available: {available}")
+        
+        template = self.SECTION_TEMPLATES[template_name]
+        for section, budget in template.items():
+            self.set_section_budget(section, budget)
+        
+        self.config['template'] = template_name
+    
+    @classmethod
+    def get_available_templates(cls) -> Dict[str, Dict[str, int]]:
+        """Get all available section templates."""
+        return cls.SECTION_TEMPLATES.copy()
     
     def set_section_budget(self, section: str, budget: int) -> None:
         """Set token budget for a specific section.
@@ -420,42 +484,44 @@ class ContextManager:
         """Remove oldest content first until target is reached."""
         tokens_removed = 0
         
-        # Collect all content with age info
-        all_content = []
+        # Collect all content items with metadata
+        all_items = []
         for section_name, section_data in self.window.sections.items():
-            for i, item in enumerate(section_data['content']):
-                all_content.append({
+            for item in section_data['content']:
+                all_items.append({
                     'section': section_name,
-                    'index': i,
+                    'item': item,
                     'added_at': item.get('added_at', 0),
                     'tokens': item.get('tokens', 0),
                     'priority': item.get('priority', 'normal')
                 })
         
         # Sort by age (oldest first), but preserve critical priority items
-        all_content.sort(key=lambda x: (
+        all_items.sort(key=lambda x: (
             x['priority'] == 'critical',  # Critical items last
             -x['added_at']  # Then by age, oldest first
         ))
         
-        # Remove items until target reached
-        for item in all_content:
+        # Mark items for removal instead of removing during iteration
+        items_to_remove = []
+        for item_data in all_items:
             if tokens_removed >= tokens_to_remove:
                 break
             
-            if item['priority'] != 'critical':  # Never remove critical items
-                section = self.window.sections[item['section']]
-                if item['index'] < len(section['content']):
-                    removed_item = section['content'].pop(item['index'])
-                    removed_tokens = removed_item.get('tokens', 0)
-                    section['used'] -= removed_tokens
-                    tokens_removed += removed_tokens
-                    
-                    # Update indices for remaining items in this section
-                    for other_item in all_content:
-                        if (other_item['section'] == item['section'] and 
-                            other_item['index'] > item['index']):
-                            other_item['index'] -= 1
+            if item_data['priority'] != 'critical':  # Never remove critical items
+                items_to_remove.append(item_data)
+                tokens_removed += item_data['tokens']
+        
+        # Remove items by rebuilding section content lists
+        for section_name, section_data in self.window.sections.items():
+            new_content = []
+            for item in section_data['content']:
+                # Keep item if it's not marked for removal
+                if not any(marked['item'] is item for marked in items_to_remove):
+                    new_content.append(item)
+                else:
+                    section_data['used'] -= item.get('tokens', 0)
+            section_data['content'] = new_content
         
         return tokens_removed
     
@@ -517,3 +583,213 @@ class ContextManager:
                     tokens_removed += removed_tokens
         
         return tokens_removed
+    
+    def enable_adaptive_budgets(self, enabled: bool = True, reallocation_threshold: float = 0.3) -> None:
+        """Enable or disable adaptive budget management.
+        
+        Args:
+            enabled: Whether to enable adaptive budgets
+            reallocation_threshold: Threshold for triggering reallocation (0.0-1.0)
+        """
+        self.config['adaptive_budgets']['enabled'] = enabled
+        self.config['adaptive_budgets']['reallocation_threshold'] = reallocation_threshold
+    
+    def track_usage(self) -> None:
+        """Track current usage for adaptive budget analysis."""
+        if not self.config['adaptive_budgets']['enabled']:
+            return
+            
+        usage_snapshot = {
+            'timestamp': time.time(),
+            'total_used': self.window.get_total_used(),
+            'section_usage': {},
+            'section_utilization': {}
+        }
+        
+        for section_name, section_data in self.window.sections.items():
+            usage_snapshot['section_usage'][section_name] = section_data['used']
+            usage_snapshot['section_utilization'][section_name] = self.window.get_section_utilization(section_name)
+        
+        # Keep only recent history (last 100 snapshots)
+        history = self.config['adaptive_budgets']['usage_history']
+        history.append(usage_snapshot)
+        if len(history) > 100:
+            history.pop(0)
+    
+    def suggest_adaptive_reallocation(self) -> Optional[Dict]:
+        """Suggest budget reallocation based on usage history.
+        
+        Returns:
+            Reallocation suggestions or None if not enough data
+        """
+        if not self.config['adaptive_budgets']['enabled']:
+            return None
+            
+        history = self.config['adaptive_budgets']['usage_history']
+        if len(history) < 10:  # Need at least 10 data points
+            return None
+        
+        # Calculate average utilization for each section
+        section_avg_utilization = {}
+        for section in self.window.sections:
+            utilizations = [snapshot['section_utilization'][section] for snapshot in history[-20:]]  # Last 20 snapshots
+            section_avg_utilization[section] = sum(utilizations) / len(utilizations)
+        
+        # Identify over/under utilized sections
+        threshold = self.config['adaptive_budgets']['reallocation_threshold']
+        underutilized = {section: util for section, util in section_avg_utilization.items() if util < threshold}
+        overutilized = {section: util for section, util in section_avg_utilization.items() if util > (1.0 - threshold)}
+        
+        if not underutilized and not overutilized:
+            return None  # No reallocation needed
+        
+        # Calculate suggested new budgets
+        current_budgets = {section: data['budget'] for section, data in self.window.sections.items()}
+        suggested_budgets = current_budgets.copy()
+        
+        # Redistribute from underutilized to overutilized sections
+        total_to_redistribute = 0
+        for section, util in underutilized.items():
+            reduction = int(current_budgets[section] * (threshold - util))
+            suggested_budgets[section] -= reduction
+            total_to_redistribute += reduction
+        
+        # Distribute to overutilized sections proportionally
+        if total_to_redistribute > 0 and overutilized:
+            overutil_total = sum(overutilized.values())
+            for section, util in overutilized.items():
+                proportion = util / overutil_total
+                suggested_budgets[section] += int(total_to_redistribute * proportion)
+        
+        return {
+            'current_budgets': current_budgets,
+            'suggested_budgets': suggested_budgets,
+            'underutilized': underutilized,
+            'overutilized': overutilized,
+            'potential_savings': sum(current_budgets[s] - suggested_budgets[s] for s in underutilized)
+        }
+    
+    def apply_adaptive_reallocation(self, auto_apply: bool = False) -> bool:
+        """Apply adaptive budget reallocation.
+        
+        Args:
+            auto_apply: Apply suggestions automatically without confirmation
+            
+        Returns:
+            True if reallocation was applied, False otherwise
+        """
+        suggestions = self.suggest_adaptive_reallocation()
+        if not suggestions:
+            return False
+        
+        if auto_apply or suggestions['potential_savings'] > 100:  # Auto-apply if significant savings
+            for section, budget in suggestions['suggested_budgets'].items():
+                self.set_section_budget(section, budget)
+            return True
+        
+        return False
+    
+    def cascade_overflow(self, source_section: str) -> int:
+        """Redistribute overflow from one section to others with available budget.
+        
+        Args:
+            source_section: Section that is over budget
+            
+        Returns:
+            Amount of tokens successfully redistributed
+        """
+        if source_section not in self.window.sections:
+            return 0
+            
+        source_data = self.window.sections[source_section]
+        overflow = max(0, source_data['used'] - source_data['budget'])
+        
+        if overflow == 0:
+            return 0
+        
+        # Find sections with available budget, prioritize by available space
+        available_sections = []
+        for section_name, section_data in self.window.sections.items():
+            if section_name != source_section:
+                available = section_data['budget'] - section_data['used']
+                if available > 0:
+                    available_sections.append((available, section_name))
+        
+        available_sections.sort(reverse=True)  # Most available first
+        
+        redistributed = 0
+        for available, section_name in available_sections:
+            if redistributed >= overflow:
+                break
+            
+            # Take as much as possible from this section
+            take_amount = min(available, overflow - redistributed)
+            
+            # Transfer budget (conceptually - adjust budgets)
+            self.window.sections[section_name]['budget'] -= take_amount
+            source_data['budget'] += take_amount
+            redistributed += take_amount
+        
+        return redistributed
+    
+    def save_snapshot(self, name: str) -> None:
+        """Save a snapshot of the current context state.
+        
+        Args:
+            name: Name for the snapshot
+        """
+        if not hasattr(self, '_snapshots'):
+            self._snapshots = {}
+        
+        snapshot = {
+            'timestamp': time.time(),
+            'config': json.loads(json.dumps(self.config)),  # Deep copy
+            'window_state': json.loads(self.window.to_json()),
+            'strategy_name': self.strategy.get_strategy_name(),
+            'compression_stats': self.compressor.get_compression_stats()
+        }
+        
+        self._snapshots[name] = snapshot
+    
+    def restore_snapshot(self, name: str) -> bool:
+        """Restore context from a saved snapshot.
+        
+        Args:
+            name: Name of the snapshot to restore
+            
+        Returns:
+            True if snapshot was restored, False if not found
+        """
+        if not hasattr(self, '_snapshots') or name not in self._snapshots:
+            return False
+        
+        snapshot = self._snapshots[name]
+        
+        # Restore configuration
+        self.config = snapshot['config'].copy()
+        
+        # Restore window structure  
+        self.window = ContextWindow.from_json(json.dumps(snapshot['window_state']))
+        
+        # Apply configuration
+        self._apply_config()
+        
+        return True
+    
+    def list_snapshots(self) -> List[Dict]:
+        """List all saved snapshots.
+        
+        Returns:
+            List of snapshot info (name, timestamp)
+        """
+        if not hasattr(self, '_snapshots'):
+            return []
+        
+        return [
+            {
+                'name': name,
+                'timestamp': snapshot['timestamp'],
+                'created': snapshot['timestamp']  # For compatibility
+            }
+            for name, snapshot in self._snapshots.items()
+        ]

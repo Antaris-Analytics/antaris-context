@@ -33,7 +33,8 @@ class MessageCompressor:
             'remove_redundant_spaces': True,
             'truncate_tool_outputs': True,
             'collapse_repeated_patterns': True,
-            'aggressive_newlines': True
+            'aggressive_newlines': True,
+            'smart_sentence_selection': True
         }
     }
     
@@ -86,6 +87,9 @@ class MessageCompressor:
             
         if self.config['aggressive_newlines']:
             compressed = self._aggressive_newline_removal(compressed)
+            
+        if self.config.get('smart_sentence_selection', False):
+            compressed = self._smart_sentence_selection(compressed)
         
         compressed_length = len(compressed)
         self.stats['compressed_length'] += compressed_length
@@ -282,3 +286,108 @@ class MessageCompressor:
         
         # Hard truncate as last resort
         return text[:max_length - 3] + '...'
+    
+    def _smart_sentence_selection(self, text: str, target_ratio: float = 0.7) -> str:
+        """Intelligently select most important sentences from text.
+        
+        Args:
+            text: Input text
+            target_ratio: Target compression ratio (0.7 = keep 70% of sentences)
+            
+        Returns:
+            Text with less important sentences removed
+        """
+        if len(text) < 200:  # Don't process very short text
+            return text
+            
+        # Split into sentences
+        sentences = self._split_sentences(text)
+        if len(sentences) <= 3:  # Keep very short texts intact
+            return text
+        
+        # Score sentences by importance
+        sentence_scores = []
+        for i, sentence in enumerate(sentences):
+            score = self._score_sentence_importance(sentence, i, len(sentences))
+            sentence_scores.append((score, sentence))
+        
+        # Sort by score (highest first) and select top sentences
+        sentence_scores.sort(key=lambda x: x[0], reverse=True)
+        target_count = max(1, int(len(sentences) * target_ratio))
+        selected_sentences = sentence_scores[:target_count]
+        
+        # Sort selected sentences back to original order
+        selected_with_index = []
+        for score, sentence in selected_sentences:
+            original_index = sentences.index(sentence)
+            selected_with_index.append((original_index, sentence))
+        
+        selected_with_index.sort(key=lambda x: x[0])
+        return ' '.join(sentence[1] for sentence in selected_with_index)
+    
+    def _split_sentences(self, text: str) -> List[str]:
+        """Split text into sentences."""
+        # Simple sentence splitting on periods, exclamations, questions
+        # Handle common abbreviations to avoid false splits
+        text = re.sub(r'\b(Mr|Mrs|Dr|Prof|etc|vs|Inc|Ltd)\.\s*', r'\1<DOT> ', text)
+        sentences = re.split(r'[.!?]+\s+', text)
+        
+        # Restore dots in abbreviations
+        sentences = [s.replace('<DOT>', '.') for s in sentences]
+        
+        # Clean up and filter empty sentences
+        return [s.strip() for s in sentences if s.strip()]
+    
+    def _score_sentence_importance(self, sentence: str, position: int, total_sentences: int) -> float:
+        """Score a sentence for importance (higher = more important)."""
+        score = 0.0
+        
+        # Position scoring - first and last sentences are more important
+        if position == 0:
+            score += 0.3  # First sentence bonus
+        elif position == total_sentences - 1:
+            score += 0.2  # Last sentence bonus
+        
+        # Length scoring - very short or very long sentences are less important
+        length = len(sentence)
+        if 20 <= length <= 150:
+            score += 0.2
+        elif length < 10:
+            score -= 0.3  # Penalize very short sentences
+        
+        # Content scoring
+        sentence_lower = sentence.lower()
+        
+        # Important indicators
+        important_words = ['important', 'critical', 'error', 'warning', 'note', 
+                          'remember', 'key', 'main', 'primary', 'essential']
+        for word in important_words:
+            if word in sentence_lower:
+                score += 0.4
+                break
+        
+        # Question sentences are often important
+        if sentence.strip().endswith('?'):
+            score += 0.3
+        
+        # Sentences with numbers or specific details
+        if re.search(r'\d+', sentence):
+            score += 0.2
+            
+        # Sentences with colons often introduce lists or explanations
+        if ':' in sentence:
+            score += 0.1
+            
+        # Penalize very common/filler words
+        filler_phrases = ['i think', 'maybe', 'perhaps', 'it seems', 'probably']
+        for phrase in filler_phrases:
+            if phrase in sentence_lower:
+                score -= 0.2
+                break
+        
+        # Penalize sentences that are mostly punctuation or whitespace
+        word_count = len(sentence.split())
+        if word_count < 3:
+            score -= 0.4
+            
+        return max(0.0, score)  # Ensure non-negative scores

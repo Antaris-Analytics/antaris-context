@@ -16,8 +16,9 @@ from .strategy import (
     BudgetStrategy
 )
 from .profiler import ContextProfiler
+from .utils import atomic_write_json
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 __author__ = "Antaris Analytics"
 __license__ = "Apache 2.0"
 
@@ -30,5 +31,6 @@ __all__ = [
     "RelevanceStrategy",
     "HybridStrategy",
     "BudgetStrategy",
-    "ContextProfiler"
+    "ContextProfiler",
+    "atomic_write_json"
 ]
