@@ -20,8 +20,18 @@
 - Context snapshots — save/restore context state at checkpoints
 - Metrics and telemetry — track compression ratios, waste percentages over time
 
-## v1.0.0
+## v1.0.0 ✅
 - Production hardening based on real-world usage feedback
 - Performance benchmarks and optimization
 - Integration testing with major LLM providers
 - Full review cycle (Claude + GPT-5.2) at production quality bar
+
+## v1.0.1 ✅
+- 4 bugs fixed, 5 design issues resolved, 3 nits cleaned (Claude review)
+- GPT-5.2 verified all fixes correct
+- 77 tests (up from 56)
+
+## Future (GPT-5.2 evolution ideas)
+- Cache token estimates per section — avoid recomputing len(text)//4 during trimming/reallocation cycles
+- JSONL for audit/log-style data — if context history/logging grows large or concurrent writers increase
+- Configurable token estimation strategy — pluggable estimator for model-specific tokenizers
