@@ -9,25 +9,6 @@ Manage context windows, token budgets, turn lifecycle, and message compression w
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-green.svg)](https://python.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-orange.svg)](LICENSE)
 
-## What's New in v2.2.0 (antaris-suite 3.0)
-
-- **Large-input guard** — `compress()` warns at 2MB input, advising callers to chunk before compressing
-- **Sliding window context management** — token budget enforced across turns with configurable eviction
-- **Message list compression** — `compress_message_list()` trims and summarises historical turns
-
-
-
-- **Turn lifecycle API** — `add_turn(role, content)`, `compact_older_turns(keep_last=20)`, `render(provider='anthropic'|'openai'|'generic')`, `set_retention_policy()`, `turn_count`
-- **Provider-ready render** — `render()` produces message lists formatted for OpenAI, Anthropic, or generic clients
-- **Suite integration** — `set_memory_client(client)` for memory-informed priority boosting; `set_router_hints(hints)` accepts hints from `antaris-router` and adjusts section budgets automatically
-- **Pluggable summarizer** — `set_summarizer(fn)` — plug in any function to compress older turns semantically
-- **`ImportanceWeightedCompressor`** — priority-aware compression with `CompressionResult` reporting
-- **`SemanticChunker`** — sentence-boundary-aware text chunking with configurable overlap
-- **Cross-session snapshots** — `export_snapshot(include_importance_above)`, `from_snapshot(dict)` for persistence across sessions
-- 150 tests (all passing)
-
-See [CHANGELOG.md](CHANGELOG.md) for full version history.
-
 ---
 
 ## Install
@@ -43,103 +24,29 @@ pip install antaris-context
 ```python
 from antaris_context import ContextManager
 
-# Initialize with a preset template
+# Initialize with a token budget and template
 manager = ContextManager(total_budget=8000, template="code_assistant")
-# Templates: chatbot, agent_with_tools, rag_pipeline, code_assistant, balanced
 
-# Add turns (conversation lifecycle)
+# Add conversation turns
 manager.add_turn("user", "How do I add JWT auth to my Flask API?")
 manager.add_turn("assistant", "Use flask-jwt-extended. Here's a minimal example...")
 
-# Check turn count and budget usage
+# Check usage
 print(f"Turns: {manager.turn_count}")
 report = manager.get_usage_report()
 print(f"Used: {report['total_used']}/{report['total_budget']} tokens ({report['utilization']:.1%})")
 
-# Compact old turns when context gets full
-removed = manager.compact_older_turns(keep_last=20)
-print(f"Compacted {removed} turns")
-
 # Render for your LLM provider
-messages = manager.render(provider="anthropic")        # → Anthropic message format
-messages = manager.render(provider="openai")           # → OpenAI message format
-messages = manager.render(provider="generic")          # → generic list of dicts
-messages = manager.render(system_prompt="Be concise")  # → inject system prompt
+messages = manager.render(format="anthropic")   # Anthropic message format
+messages = manager.render(format="openai")      # OpenAI message format
+plain    = manager.render(format="raw")         # "role: content\n..." string
 ```
 
 ---
 
-## OpenClaw Integration
+## Token Budgets
 
-antaris-context is purpose-built for OpenClaw agent sessions. Use it to manage the context window across multi-turn conversations — automatically compressing older turns to make room for memory recall, tool results, and new input.
-
-```python
-from antaris_context import ContextManager
-
-ctx = ContextManager(total_budget=8000)
-ctx.add_turn("user", user_input)
-ctx.add_turn("assistant", agent_response)
-
-# Before the next turn, compact to stay within budget
-ctx.compact_older_turns(keep_last=10)
-messages = ctx.render()  # Ready for any provider (OpenAI, Anthropic, etc.)
-```
-
-Pairs directly with antaris-memory (inject recalled memories into context budget) and antaris-router (route based on actual token count). Both are wired automatically in **antaris-pipeline**.
-
----
-
-## Turn Lifecycle
-
-```python
-manager = ContextManager(total_budget=16000, template="agent_with_tools")
-
-# Add turns from a conversation
-for msg in conversation_history:
-    manager.add_turn(msg["role"], msg["content"])
-
-# Compact old turns before hitting the budget limit
-removed = manager.compact_older_turns(keep_last=30)
-
-# With a pluggable summarizer (compress rather than drop)
-def my_summarizer(turns: list[dict]) -> str:
-    """Call your LLM to summarize old turns."""
-    # ... call OpenAI/Claude/Ollama ...
-    return "Summary of earlier conversation: ..."
-
-manager.set_summarizer(my_summarizer)
-manager.compact_older_turns(keep_last=20)
-# Older turns are passed to my_summarizer and replaced with the summary
-```
-
----
-
-## Suite Integration
-
-```python
-from antaris_context import ContextManager
-from antaris_memory import MemorySystem
-from antaris_router import Router
-
-# Memory-informed priority boosting
-mem = MemorySystem("./workspace")
-mem.load()
-manager = ContextManager(total_budget=8000)
-manager.set_memory_client(mem)
-# optimize_context() now boosts sections matching recent memory queries
-
-# Router-driven budget adaptation
-router = Router(config_path="./config")
-result = router.route(user_input)
-manager.set_router_hints(result.routing_hints)
-# Section budgets shift based on router's complexity assessment
-```
-
----
-
-## Templates
-
-Built-in section budget presets for common agent patterns:
+Every `ContextManager` splits its total budget across four sections — `system`, `memory`, `conversation`, and `tools`. Built-in templates pre-allocate these for common patterns:
 
 ```python
 templates = ContextManager.get_available_templates()
@@ -155,96 +62,282 @@ manager = ContextManager(total_budget=8000, template="agent_with_tools")
 manager.apply_template("rag_pipeline")  # Switch template mid-session
 ```
 
----
-
-## Content Management
+Add content to sections with priority levels:
 
 ```python
-# Add content with priorities
 manager.add_content('system', "You are a coding assistant.", priority='critical')
 manager.add_content('memory', "User prefers Python examples.", priority='important')
 manager.add_content('conversation', messages, priority='normal')
 manager.add_content('tools', long_debug_output, priority='optional')
 
 # Priority levels:
-# critical  → never truncated (system prompts, safety rules)
-# important → removed only when necessary
-# normal    → standard selection (conversation history)
-# optional  → first to go when space is needed
+# critical  — never truncated (system prompts, safety rules)
+# important — removed only when necessary
+# normal    — standard selection (conversation history)
+# optional  — first to go when space is needed
+```
 
-# Add with query for relevance-based selection
-manager.add_content('conversation', messages, query="JWT authentication Flask")
+---
 
-# Set selection strategy
+## Turn Lifecycle
+
+Turns are the core unit of conversation management. Add turns, compact old ones, and render for any provider:
+
+```python
+manager = ContextManager(total_budget=16000, template="agent_with_tools")
+
+# Add turns from a conversation
+for msg in conversation_history:
+    manager.add_turn(msg["role"], msg["content"])
+
+print(f"Turn count: {manager.turn_count}")
+
+# Configure retention policy
+manager.set_retention_policy(
+    keep_last_n_verbatim=10,
+    summarize_older=True,
+    max_turns=100,
+)
+
+# Compact old turns (truncates to 120 chars by default)
+removed = manager.compact_older_turns(keep_last=20)
+print(f"Compacted {removed} turns")
+
+# Plug in a real summarizer for semantic compression
+def my_summarizer(text: str) -> str:
+    # Call your LLM to summarize
+    return "Summary: ..."
+
+manager.set_summarizer(my_summarizer)
+manager.compact_older_turns(keep_last=20)
+# Older turns are now passed to my_summarizer instead of truncated
+```
+
+---
+
+## Rendering
+
+`render()` produces provider-ready message lists. Use the `format` parameter (or the `provider` alias):
+
+```python
+# Anthropic format — list of {"role": ..., "content": ...} dicts
+messages = manager.render(format="anthropic")
+
+# OpenAI format — same structure, ready for chat completions
+messages = manager.render(format="openai")
+
+# Raw format — plain text string "role: content\n..."
+plain = manager.render(format="raw")
+
+# Inject a system prompt
+messages = manager.render(format="openai", system_prompt="Be concise.")
+```
+
+---
+
+## Sliding Window
+
+`get_sliding_window()` returns the most recent turns without mutating state — a lightweight read-only view:
+
+```python
+# Get the last 5 turns
+recent = manager.get_sliding_window(max_turns=5)
+# [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
+
+# Use it for a focused context window before an API call
+for turn in recent:
+    print(f"{turn['role']}: {turn['content'][:80]}")
+```
+
+---
+
+## Trim to Budget
+
+`trim_to_budget()` prunes section content (lowest priority first) until the total token count is within the target:
+
+```python
+manager.add_content('system', system_prompt, priority='critical')
+manager.add_content('conversation', long_history, priority='normal')
+manager.add_content('tools', tool_output, priority='optional')
+
+# Hard-cap total tokens at 4000
+freed = manager.trim_to_budget(max_tokens=4000)
+print(f"Freed {freed} tokens")
+# 'optional' items are dropped first, then 'normal', then 'important'
+# 'critical' items are never removed
+```
+
+---
+
+## Overflow Cascade
+
+When a section exceeds its budget, `cascade_overflow()` borrows unused slack from other sections:
+
+```python
+manager.add_content('tools', very_long_tool_output, priority='normal')
+
+if manager.is_over_budget():
+    redistributed = manager.cascade_overflow('tools')
+    print(f"Borrowed {redistributed} tokens from other sections")
+```
+
+---
+
+## Adaptive Compression
+
+The `optimize_context()` method applies multi-stage compression — content-level compression, priority-aware truncation, and section rebalancing — to hit a target utilization:
+
+```python
+result = manager.optimize_context(query="JWT authentication", target_utilization=0.85)
+
+print(f"Success: {result.success}")
+print(f"Tokens saved: {result.tokens_saved}")
+print(f"Compression ratio: {result.compression_ratio:.2f}")
+print(f"Actions: {result.actions_taken}")
+```
+
+Set compression levels and selection strategies:
+
+```python
+manager.set_compression_level('aggressive')  # light, moderate, aggressive
+
 manager.set_strategy('hybrid', recency_weight=0.4, relevance_weight=0.6)
 manager.set_strategy('recency', prefer_high_priority=True)
 manager.set_strategy('budget', approach='balanced')
-
-# Set compression level
-manager.set_compression_level('moderate')  # light, moderate, aggressive
 ```
 
----
-
-## Compression
+Track usage patterns over time and let budgets adapt automatically:
 
 ```python
-from antaris_context import MessageCompressor, ImportanceWeightedCompressor, SemanticChunker
-
-# Basic message compression
-compressor = MessageCompressor('moderate')
-compressed = compressor.compress_message_list(messages, max_content_length=500)
-output = compressor.compress_tool_output(long_output, max_lines=20, keep_first=10, keep_last=10)
-stats = compressor.get_compression_stats()
-print(f"Saved {stats['bytes_saved']} bytes ({stats['compression_ratio']:.1%})")
-
-# Priority-aware compression
-iwc = ImportanceWeightedCompressor(keep_top_n=5, compress_middle=True, drop_threshold=0.1)
-
-# Sentence-boundary chunking
-chunker = SemanticChunker(min_chunk_size=100, max_chunk_size=500)
-chunks = chunker.chunk(long_text)  # → list of SemanticChunk
-```
-
----
-
-## Adaptive Budgets
-
-```python
-# Track usage patterns over time
+manager.enable_adaptive_budgets(target_utilization=0.85)
 manager.track_usage()
 
-# Get reallocation suggestions
 suggestions = manager.suggest_adaptive_reallocation()
-for section, budget in suggestions['suggested_budgets'].items():
-    current = suggestions['current_budgets'][section]
-    print(f"{section}: {current} → {budget} tokens")
+if suggestions:
+    for section, budget in suggestions['suggested_budgets'].items():
+        current = suggestions['current_budgets'][section]
+        print(f"{section}: {current} -> {budget} tokens")
 
-# Apply automatically
-manager.apply_adaptive_reallocation(auto_apply=True, min_improvement_pct=10)
-
-# Enable continuous adaptation
-manager.enable_adaptive_budgets(target_utilization=0.85)
+manager.apply_adaptive_reallocation(auto_apply=True)
 ```
+
+---
+
+## Relevance Scoring
+
+Content can be scored for relevance against a query, so the most relevant items survive compression:
+
+```python
+# Add content with a query for relevance-based selection
+manager.add_content('conversation', messages, query="JWT authentication Flask")
+
+# The hybrid strategy weighs recency and relevance together
+manager.set_strategy('hybrid', recency_weight=0.4, relevance_weight=0.6)
+```
+
+The `ImportanceWeightedCompressor` scores items on five axes — recency, priority label, explicit importance score, message role, and content density — then keeps top-N verbatim, compresses middle items, and drops low-scorers:
+
+```python
+from antaris_context import ImportanceWeightedCompressor
+
+iwc = ImportanceWeightedCompressor(keep_top_n=5, compress_middle=True, drop_threshold=0.1)
+result = iwc.compress_items(content_items)
+# result["kept"]       — items kept verbatim
+# result["compressed"] — items with condensed content
+# result["dropped"]    — items removed entirely
+# result["tokens_saved"]
+```
+
+The `SemanticChunker` splits text at sentence and paragraph boundaries with configurable chunk sizes:
+
+```python
+from antaris_context import SemanticChunker
+
+chunker = SemanticChunker(min_chunk_size=100, max_chunk_size=500)
+chunks = chunker.chunk(long_text)
+for chunk in chunks:
+    print(f"[{chunk.chunk_type}] importance={chunk.importance_score:.2f}  {chunk.content[:60]}...")
+```
+
+---
+
+## Suite Integration
+
+### Memory-informed priority boosting
+
+Connect `antaris-memory` so that `optimize_context()` automatically boosts content items matching recent memory hits:
+
+```python
+from antaris_context import ContextManager
+from antaris_memory import MemorySystem
+
+mem = MemorySystem("./workspace")
+mem.load()
+
+manager = ContextManager(total_budget=8000)
+manager.set_memory_client(mem)
+# optimize_context() now elevates items that overlap with memory search results
+```
+
+### Router-driven budget adaptation
+
+Accept hints from `antaris-router` to shift section budgets and target utilization on the fly:
+
+```python
+from antaris_router import Router
+
+router = Router(config_path="./config")
+result = router.route(user_input)
+
+manager.set_router_hints(result.routing_hints)
+# Hints like {'boost_section': 'tools', 'target_utilization': 0.7}
+# shift 10% of total budget to the boosted section automatically
+```
+
+---
+
+## Compression Utilities
+
+```python
+from antaris_context import MessageCompressor
+
+compressor = MessageCompressor('moderate')  # light, moderate, aggressive
+
+# Compress a single string
+compressed = compressor.compress(long_text)
+
+# Compress a list of message dicts
+compressed_msgs = compressor.compress_message_list(messages, max_content_length=500)
+
+# Compress tool output (keep first/last N lines)
+output = compressor.compress_tool_output(long_output, max_lines=20, keep_first=10, keep_last=10)
+
+# Check stats
+stats = compressor.get_compression_stats()
+print(f"Saved {stats['bytes_saved']} bytes ({stats['compression_ratio']:.1%})")
+```
+
+Large inputs (>2 MB) trigger a warning — chunk before compressing for best performance.
 
 ---
 
 ## Cross-Session Snapshots
 
-```python
-# Save context state between sessions
-manager.save_snapshot("pre-refactor")
-snapshot_data = manager.export_snapshot(include_importance_above=0.5)
+Save and restore full context state (including content) across sessions:
 
-# Restore later
+```python
+# Export to a JSON-serializable dict
+snapshot = manager.export_snapshot(include_importance_above=0.5)
+
+# Reconstruct a new manager from the snapshot
+manager2 = ContextManager.from_snapshot(snapshot)
+
+# In-process structural snapshots (lightweight, no content)
+manager.save_snapshot("pre-refactor")
 manager.restore_snapshot("pre-refactor")
 
-# Reconstruct from exported dict
-manager2 = ContextManager.from_snapshot(snapshot_data)
-
-# List saved snapshots
-for name in manager.list_snapshots():
-    print(name)
+for info in manager.list_snapshots():
+    print(info['name'])
 ```
 
 ---
@@ -288,11 +381,14 @@ for turn in conversation_history:
 if manager.is_over_budget():
     manager.compact_older_turns(keep_last=20)
 
+# Hard-trim to budget
+manager.trim_to_budget(max_tokens=7500)
+
 # Optimize to target utilization
 result = manager.optimize_context(query=current_query, target_utilization=0.85)
 
 # Render for your provider
-messages = manager.render(provider="openai")
+messages = manager.render(format="openai")
 response = openai_client.chat.completions.create(model="gpt-4o", messages=messages)
 ```
 
@@ -329,8 +425,7 @@ manager.save_config("updated_config.json")
 
 ## Token Estimation
 
-Uses character-based approximation (~4 chars/token). Fast and sufficient for budget management.
-For exact counts, plug in your model's tokenizer:
+Uses character-based approximation (~4 chars/token). Fast and sufficient for budget management. For exact counts, plug in your model's tokenizer:
 
 ```python
 import tiktoken
@@ -349,17 +444,6 @@ manager._estimate_tokens = lambda text: len(enc.encode(text))
 
 ---
 
-## Performance
-
-| Operation | Throughput |
-|-----------|-----------|
-| Token estimation | ~100K chars/sec |
-| Message compression | ~50K chars/sec |
-| Strategy selection | ~10K messages/sec |
-| Context analysis | ~1K content items/sec |
-
----
-
 ## Running Tests
 
 ```bash
@@ -372,19 +456,15 @@ All 150 tests pass with zero external dependencies.
 
 ---
 
-## Part of the Antaris Analytics Suite
+## Part of the Antaris Analytics Suite — v3.0.0
 
 - **[antaris-memory](https://pypi.org/project/antaris-memory/)** — Persistent memory for AI agents
 - **[antaris-router](https://pypi.org/project/antaris-router/)** — Adaptive model routing with SLA enforcement
 - **[antaris-guard](https://pypi.org/project/antaris-guard/)** — Security and prompt injection detection
 - **antaris-context** — Context window optimization (this package)
 - **[antaris-pipeline](https://pypi.org/project/antaris-pipeline/)** — Agent orchestration pipeline
+- **[antaris-contracts](https://pypi.org/project/antaris-contracts/)** — Versioned schemas, failure semantics, and debug CLI
 
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE) for details.
-
----
-
-**Built with ❤️ by Antaris Analytics**  
-*Deterministic infrastructure for AI agents*
