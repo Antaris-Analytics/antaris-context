@@ -9,7 +9,13 @@ Manage context windows, token budgets, turn lifecycle, and message compression w
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-green.svg)](https://python.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-orange.svg)](LICENSE)
 
-## What's New in v2.0.0
+## What's New in v2.2.0 (antaris-suite 3.0)
+
+- **Large-input guard** — `compress()` warns at 2MB input, advising callers to chunk before compressing
+- **Sliding window context management** — token budget enforced across turns with configurable eviction
+- **Message list compression** — `compress_message_list()` trims and summarises historical turns
+
+
 
 - **Turn lifecycle API** — `add_turn(role, content)`, `compact_older_turns(keep_last=20)`, `render(provider='anthropic'|'openai'|'generic')`, `set_retention_policy()`, `turn_count`
 - **Provider-ready render** — `render()` produces message lists formatted for OpenAI, Anthropic, or generic clients
