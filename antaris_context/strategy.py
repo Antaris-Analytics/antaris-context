@@ -74,7 +74,7 @@ class RecencyStrategy(ContextStrategy):
                 selected.append(item)
                 used_tokens += item_tokens
             else:
-                break
+                continue  # skip oversized item; smaller ones later may still fit
         
         return selected
     
@@ -352,7 +352,7 @@ class BudgetStrategy(ContextStrategy):
         # Sort by value per token (highest first)
         valued_content.sort(key=lambda x: x['value_per_token'], reverse=True)
         
-        # Greedy selection
+        # Greedy selection — continue past oversized items so smaller ones can still fit
         selected = []
         used_tokens = 0
         
@@ -361,6 +361,8 @@ class BudgetStrategy(ContextStrategy):
             if used_tokens + item_tokens <= budget:
                 selected.append(item)
                 used_tokens += item_tokens
+            else:
+                continue  # smaller items later may still fit
         
         return selected
     

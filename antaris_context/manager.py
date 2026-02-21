@@ -2,15 +2,27 @@
 Main context manager for coordinating context window optimization.
 """
 
-from typing import Dict, List, Optional, Any, Union
+__version__ = "2.2.0"
+
+from typing import Callable, Dict, List, Optional, Any, Union, Protocol, runtime_checkable
 import json
+import re
 import os
 import time
 from .window import ContextWindow
+
+
 from .compressor import MessageCompressor
 from .strategy import ContextStrategy, RecencyStrategy, RelevanceStrategy, HybridStrategy, BudgetStrategy
 from .profiler import ContextProfiler
 from .utils import atomic_write_json
+from .importance import CompressionResult, ImportanceWeightedCompressor, SemanticChunker
+
+
+@runtime_checkable
+class MemoryClient(Protocol):
+    """Protocol for antaris-memory integration."""
+    def search(self, query: str, limit: int = 5) -> list: ...
 
 
 class ContextManager:
@@ -97,6 +109,23 @@ class ContextManager:
             self.load_config(config_file)
         
         self._apply_config()
+
+        # Sprint 12: turn-by-turn lifecycle state
+        self._turns: List[Dict] = []
+        self._retention_policy: Dict = {
+            'keep_last_n_verbatim': 10,
+            'summarize_older': True,
+            'max_turns': 100,
+        }
+
+        # Sprint 6 / Sprint 12: per-section numeric priorities (higher = kept longer)
+        self._section_priorities: Dict[str, int] = {}
+
+        # Integration hooks
+        self._memory_client: Optional[MemoryClient] = None
+        self._router_hints: Dict = {}
+        self._hint_target_utilization: Optional[float] = None
+        self._summarizer: Optional[Callable[[str], str]] = None
     
     def load_config(self, config_file: str) -> None:
         """Load configuration from JSON file.
@@ -224,62 +253,135 @@ class ContextManager:
         else:
             raise ValueError(f"Unsupported content type: {type(content)}")
     
-    def optimize_context(self, query: Optional[str] = None, target_utilization: float = 0.85) -> Dict:
+    def optimize_context(self, query: Optional[str] = None, target_utilization: float = 0.85) -> CompressionResult:
         """Optimize current context window to achieve target utilization.
-        
+
+        Returns a :class:`~antaris_context.importance.CompressionResult` that
+        supports both attribute access (``result.compression_ratio``) and
+        dict-style access (``result['success']``) for backward compatibility.
+
         Args:
             query: Optional query for relevance-based optimization
             target_utilization: Target utilization ratio (0.0 - 1.0)
-            
+
         Returns:
-            Optimization report
+            CompressionResult with stats and backward-compatible dict access.
         """
-        optimization_report = {
-            'initial_state': self.get_usage_report(),
-            'actions_taken': [],
-            'final_state': {},
-            'success': False
-        }
-        
-        initial_utilization = self.window.get_total_used() / self.total_budget
-        
-        # If already at target, no optimization needed
-        if abs(initial_utilization - target_utilization) < 0.05:
-            optimization_report['success'] = True
-            optimization_report['final_state'] = self.get_usage_report()
-            return optimization_report
-        
-        actions_taken = []
-        
+        # Allow router hints to override target_utilization
+        if self._hint_target_utilization is not None:
+            target_utilization = self._hint_target_utilization
+
+        initial_state = self.get_usage_report()
+        original_tokens = self.window.get_total_used()
+        initial_utilization = original_tokens / self.total_budget if self.total_budget else 0.0
+
+        actions_taken: List[str] = []
+
+        # Memory-informed importance boosting: if a memory client is connected,
+        # boost priority of content items that overlap with recent memory hits.
+        if self._memory_client is not None and query:
+            try:
+                memory_hits = self._memory_client.search(query, limit=5)
+                if memory_hits:
+                    # Extract keywords from memory results
+                    memory_keywords: set = set()
+                    for hit in memory_hits:
+                        text = hit if isinstance(hit, str) else str(hit.get('content', hit))
+                        memory_keywords.update(w.lower() for w in re.findall(r'\b\w{4,}\b', text))
+                    # Boost items whose text overlaps with memory keywords
+                    boosted = 0
+                    for section_data in self.window.sections.values():
+                        for item in section_data['content']:
+                            item_words = set(_re.findall(r'\b\w{4,}\b', item.get('content', '').lower()))
+                            if item_words & memory_keywords:
+                                if item.get('priority', 'normal') not in ('critical', 'important'):
+                                    item['priority'] = 'important'
+                                    boosted += 1
+                    if boosted:
+                        actions_taken.append(f'Memory boost: elevated priority of {boosted} items')
+            except Exception:
+                pass  # Never let memory errors break context optimization
+        sections_dropped = 0
+        sections_compressed = 0
+
+        # If already at or under target, no optimization needed
+        if initial_utilization <= target_utilization:
+            final_state = self.get_usage_report()
+            final_tokens = self.window.get_total_used()
+            tokens_saved = original_tokens - final_tokens
+            ratio = final_tokens / original_tokens if original_tokens else 1.0
+            return CompressionResult(
+                compression_ratio=ratio,
+                sections_dropped=0,
+                sections_compressed=0,
+                tokens_saved=tokens_saved,
+                original_tokens=original_tokens,
+                final_tokens=final_tokens,
+                actions_taken=actions_taken,
+                success=True,
+                initial_state=initial_state,
+                final_state=final_state,
+            )
+
         # Step 1: Apply compression if not already applied
         if not self.config['auto_compress']:
             self._apply_compression()
             actions_taken.append('Applied content compression')
-        
-        # Step 2: If over budget, apply truncation strategy
+
+        # Step 2: If over budget, apply section-priority-aware truncation
         if initial_utilization > target_utilization:
-            truncated_tokens = self._apply_truncation(target_utilization)
-            if truncated_tokens > 0:
-                actions_taken.append(f'Truncated {truncated_tokens} tokens using {self.config["truncation_strategy"]} strategy')
-        
-        # Step 3: If under budget and we have more content, try to add more
+            # Drop low-priority sections first when section priorities are set
+            if self._section_priorities:
+                sec_dropped, sec_compressed, tok_saved = self._apply_priority_section_truncation(
+                    target_utilization
+                )
+                sections_dropped += sec_dropped
+                sections_compressed += sec_compressed
+                if tok_saved > 0:
+                    actions_taken.append(
+                        f'Priority-aware: dropped {sec_dropped} sections, '
+                        f'compressed {sec_compressed} sections, saved {tok_saved} tokens'
+                    )
+
+            # Fall through to content-level truncation if still over budget
+            current_util = self.window.get_total_used() / self.total_budget if self.total_budget else 0
+            if current_util > target_utilization:
+                truncated_tokens = self._apply_truncation(target_utilization)
+                if truncated_tokens > 0:
+                    actions_taken.append(
+                        f'Truncated {truncated_tokens} tokens using '
+                        f'{self.config["truncation_strategy"]} strategy'
+                    )
+
         elif initial_utilization < target_utilization:
-            # This would require access to additional content pool
             actions_taken.append('Context under-utilized but no additional content available')
-        
-        # Step 4: Re-balance section budgets if needed
+
+        # Step 3: Re-balance section budgets if needed
         current_usage = self.window.get_total_used()
         if current_usage > 0:
             rebalance_suggestions = self.profiler.suggest_budget_reallocation(self.window)
             if rebalance_suggestions['potential_improvements']:
                 actions_taken.append('Budget rebalancing suggestions available')
-        
-        final_utilization = self.window.get_total_used() / self.total_budget
-        optimization_report['actions_taken'] = actions_taken
-        optimization_report['final_state'] = self.get_usage_report()
-        optimization_report['success'] = abs(final_utilization - target_utilization) < 0.1
-        
-        return optimization_report
+
+        final_state = self.get_usage_report()
+        final_tokens = self.window.get_total_used()
+        tokens_saved = original_tokens - final_tokens
+        final_utilization = final_tokens / self.total_budget if self.total_budget else 0.0
+        compression_ratio = final_tokens / original_tokens if original_tokens else 1.0
+        success = abs(final_utilization - target_utilization) < 0.1
+
+        return CompressionResult(
+            compression_ratio=compression_ratio,
+            sections_dropped=sections_dropped,
+            sections_compressed=sections_compressed,
+            tokens_saved=tokens_saved,
+            original_tokens=original_tokens,
+            final_tokens=final_tokens,
+            actions_taken=actions_taken,
+            success=success,
+            initial_state=initial_state,
+            final_state=final_state,
+        )
     
     def set_strategy(self, strategy_name: str, **kwargs) -> None:
         """Set the content selection strategy.
@@ -310,7 +412,70 @@ class ContextManager:
         """
         self.compressor = MessageCompressor(level)
         self.config['compression_level'] = level
-    
+
+    def set_memory_client(self, client: 'MemoryClient') -> None:
+        """Connect an antaris-memory MemorySystem for memory-informed scoring.
+
+        When set, :meth:`optimize_context` will boost the importance of content
+        items whose text overlaps with recent memory search hits.
+
+        Args:
+            client: Any object implementing the :class:`MemoryClient` protocol
+                    (must have a ``search(query, limit)`` method).
+        """
+        self._memory_client = client
+
+    def set_router_hints(self, hints: dict) -> None:
+        """Accept routing hints from antaris-router to adjust context strategy.
+
+        Hints are applied immediately:
+        - ``boost_section``: shift 10% of total budget to that section
+        - ``target_utilization``: becomes the default target for optimize_context
+        - ``task_type``: informational only (stored for introspection)
+
+        Example hints::
+
+            {'boost_section': 'tools', 'target_utilization': 0.7, 'task_type': 'code'}
+
+        Args:
+            hints: Dict of routing hints from antaris-router.
+        """
+        self._router_hints = hints
+
+        # Boost a section by shifting 10% of total budget to it
+        if 'boost_section' in hints and hints['boost_section'] in self.window.sections:
+            boost_section = hints['boost_section']
+            shift_amount = max(1, int(self.total_budget * 0.10))
+            # Take proportionally from all other sections
+            other_sections = [s for s in self.window.sections if s != boost_section]
+            if other_sections:
+                per_section = shift_amount // len(other_sections)
+                for sec in other_sections:
+                    current = self.window.sections[sec]['budget']
+                    new_budget = max(0, current - per_section)
+                    self.window.sections[sec]['budget'] = new_budget
+                    self.config['section_budgets'][sec] = new_budget
+                # Add full shift_amount to boosted section
+                boosted_budget = self.window.sections[boost_section]['budget'] + shift_amount
+                self.window.sections[boost_section]['budget'] = boosted_budget
+                self.config['section_budgets'][boost_section] = boosted_budget
+
+        if 'target_utilization' in hints:
+            self._hint_target_utilization = float(hints['target_utilization'])
+
+    def set_summarizer(self, fn: Callable[[str], str]) -> None:
+        """Set a custom summarization function for :meth:`compact_older_turns`.
+
+        Without a summarizer, older turns are truncated to 120 characters.
+        With a summarizer, the provided callable is used instead, enabling
+        semantic summarization (e.g. via an LLM).
+
+        Args:
+            fn: Callable accepting a turn content string and returning a
+                shorter summary string.
+        """
+        self._summarizer = fn
+
     def get_usage_report(self) -> Dict:
         """Get comprehensive usage report."""
         base_report = self.window.get_usage_report()
@@ -644,7 +809,7 @@ class ContextManager:
         # Calculate average utilization for each section
         section_avg_utilization = {}
         for section in self.window.sections:
-            utilizations = [snapshot['section_utilization'][section] for snapshot in history[-20:]]  # Last 20 snapshots
+            utilizations = [snapshot['section_utilization'].get(section, 0.0) for snapshot in history[-20:]]  # Last 20 snapshots
             section_avg_utilization[section] = sum(utilizations) / len(utilizations)
         
         # Identify over/under utilized sections
@@ -819,3 +984,481 @@ class ContextManager:
             }
             for name, snapshot in self._snapshots.items()
         ]
+
+    # ------------------------------------------------------------------
+    # Sprint 6: Cross-session context sharing
+    # ------------------------------------------------------------------
+
+    def export_snapshot(self, include_importance_above: float = 0.0) -> Dict:
+        """Export context (including content) as a JSON-serializable dict.
+
+        Unlike :meth:`save_snapshot` / :meth:`restore_snapshot` which are
+        in-process structural checkpoints, this method serialises actual
+        section content so the state can be transferred to another process
+        or session.
+
+        Args:
+            include_importance_above: Only include items whose
+                ``importance_score`` (or a default of 1.0) is strictly
+                greater than this threshold.  Use ``0.7`` to export only
+                high-importance content.
+
+        Returns:
+            JSON-serialisable dict that can be passed to
+            :meth:`from_snapshot`.
+        """
+        snapshot: Dict = {
+            'version': __version__,
+            'timestamp': time.time(),
+            'total_budget': self.total_budget,
+            'config': json.loads(json.dumps(self.config)),
+            'sections': {},
+            'turns': list(self._turns),
+            'retention_policy': dict(self._retention_policy),
+            'section_priorities': dict(self._section_priorities),
+        }
+
+        for section_name, section_data in self.window.sections.items():
+            items = []
+            for item in section_data['content']:
+                importance = float(item.get('importance_score', 1.0))
+                if importance > include_importance_above:
+                    items.append({
+                        'content': item['content'],
+                        'tokens': item['tokens'],
+                        'priority': item['priority'],
+                        'added_at': item.get('added_at', 0),
+                        'importance_score': importance,
+                    })
+            snapshot['sections'][section_name] = {
+                'budget': section_data['budget'],
+                'items': items,
+            }
+
+        return snapshot
+
+    @classmethod
+    def from_snapshot(cls, snapshot: Dict) -> 'ContextManager':
+        """Reconstruct a :class:`ContextManager` from a dict produced by
+        :meth:`export_snapshot`.
+
+        Args:
+            snapshot: Dict as returned by :meth:`export_snapshot`.
+
+        Returns:
+            A fully initialised :class:`ContextManager` instance.
+        """
+        total_budget = snapshot.get('total_budget', 8000)
+        manager = cls(total_budget=total_budget)
+
+        # Restore configuration
+        saved_config = snapshot.get('config', {})
+        if saved_config:
+            manager.config.update(saved_config)
+            manager._apply_config()
+
+        # Restore section content
+        for section_name, section_data in snapshot.get('sections', {}).items():
+            # Create section if it doesn't exist (dynamic sections)
+            if section_name not in manager.window.sections:
+                manager.window.sections[section_name] = {
+                    'used': 0, 'budget': 0, 'content': []
+                }
+            budget = section_data.get('budget', 0)
+            manager.window.sections[section_name]['budget'] = budget
+
+            for item in section_data.get('items', []):
+                content_item = {
+                    'content': item['content'],
+                    'tokens': item['tokens'],
+                    'priority': item['priority'],
+                    'added_at': item.get('added_at', 0),
+                    'importance_score': item.get('importance_score', 1.0),
+                }
+                manager.window.sections[section_name]['content'].append(content_item)
+                manager.window.sections[section_name]['used'] += item['tokens']
+
+        # Restore turns & policies
+        manager._turns = list(snapshot.get('turns', []))
+        if snapshot.get('retention_policy'):
+            manager._retention_policy = dict(snapshot['retention_policy'])
+        if snapshot.get('section_priorities'):
+            manager._section_priorities = dict(snapshot['section_priorities'])
+
+        return manager
+
+    # ------------------------------------------------------------------
+    # Sprint 12: Turn-by-turn lifecycle
+    # ------------------------------------------------------------------
+
+    def add_turn(self, role: str, content: str, section: str = 'conversation') -> None:
+        """Append a conversation turn.
+
+        Stores the turn in ``_turns`` (for :meth:`render`) AND registers it
+        as content in *section* (default ``'conversation'``) so that
+        :meth:`get_usage_report`, token budgets, and :meth:`analyze_context`
+        all reflect turn content.
+
+        Args:
+            role: Speaker role — typically ``'user'`` or ``'assistant'``.
+            content: Turn text.
+            section: Section to register the content in (default
+                ``'conversation'``).
+        """
+        self._turns.append({
+            'role': role,
+            'content': content,
+            'timestamp': time.time(),
+        })
+
+        max_turns = self._retention_policy.get('max_turns', 100)
+        if max_turns and len(self._turns) > max_turns:
+            # Enforce hard cap: drop the oldest turns first
+            excess = len(self._turns) - max_turns
+            self._turns = self._turns[excess:]
+
+        # Also register in the window so budgets / reports see turn content
+        if section in self.window.sections:
+            self.window.add_content(section, f"{role}: {content}")
+
+    @property
+    def turn_count(self) -> int:
+        """Number of turns currently stored."""
+        return len(self._turns)
+
+    def set_retention_policy(
+        self,
+        keep_last_n_verbatim: int = 10,
+        summarize_older: bool = True,
+        max_turns: int = 100,
+    ) -> None:
+        """Configure turn retention policy.
+
+        Args:
+            keep_last_n_verbatim: Keep the most recent N turns as-is.
+            summarize_older: If ``True``, older turns are condensed to a
+                short summary rather than being dropped entirely.
+            max_turns: Hard cap on total turns stored.
+        """
+        self._retention_policy = {
+            'keep_last_n_verbatim': keep_last_n_verbatim,
+            'summarize_older': summarize_older,
+            'max_turns': max_turns,
+        }
+
+    def compact_older_turns(self, keep_last: int = 20) -> int:
+        """Truncate/summarize turns older than *keep_last* according to retention policy.
+
+        Turns beyond the verbatim window are either truncated to 120 chars
+        (default) or processed by a custom summarizer set via
+        :meth:`set_summarizer`. Use :meth:`set_summarizer` for semantic
+        summarization; without it, turns are simply truncated.
+
+        Args:
+            keep_last: Number of recent turns to leave untouched.
+
+        Returns:
+            Number of turns that were compacted (summarised or dropped).
+        """
+        if len(self._turns) <= keep_last:
+            return 0
+
+        older = self._turns[:-keep_last]
+        recent = self._turns[-keep_last:]
+        compacted_count = 0
+
+        if self._retention_policy.get('summarize_older', True):
+            summarised = []
+            for turn in older:
+                if self._summarizer is not None:
+                    # Use pluggable summarizer for semantic summarization
+                    summary = self._summarizer(turn['content'])
+                else:
+                    # Default: simple truncation
+                    summary = self._truncate_turn(turn['content'])
+                summarised.append({
+                    'role': turn['role'],
+                    'content': summary,
+                    'timestamp': turn.get('timestamp', 0),
+                    '_summarised': True,
+                })
+                compacted_count += 1
+            self._turns = summarised + recent
+        else:
+            # Drop older turns entirely
+            compacted_count = len(older)
+            self._turns = recent
+
+        return compacted_count
+
+    # ------------------------------------------------------------------
+    # Sprint 12: Provider-specific rendering
+    # ------------------------------------------------------------------
+
+    def render(
+        self,
+        provider: str = 'generic',
+        system_prompt: Optional[str] = None,
+        format: Optional[str] = None,
+    ) -> Any:
+        """Render the stored turns as a provider-specific message list.
+
+        Sprint 2.7 adds a ``format`` parameter as an alias for *provider*
+        so callers can use either name.  The ``"raw"`` format returns a
+        plain string instead of a message list.
+
+        Args:
+            provider: Target provider — ``'anthropic'``, ``'openai'``,
+                ``'raw'``, or ``'generic'``.  When *format* is also
+                supplied, *format* takes precedence.
+            system_prompt: Optional system prompt to prepend (not used
+                when ``format='raw'``).
+            format: Optional alias for *provider*.  Accepted values:
+                ``"anthropic"``, ``"openai"``, ``"raw"``.
+
+        Returns:
+            - **list[dict]** — for ``'anthropic'``, ``'openai'``, or
+              ``'generic'``: ``[{"role": ..., "content": ...}, ...]``
+              ready to pass to a model API.
+            - **str** — for ``'raw'``: plain text with ``role: content``
+              lines separated by newlines.
+        """
+        target = (format or provider).lower()
+
+        if target == 'raw':
+            parts: List[str] = []
+            for turn in self._turns:
+                parts.append(f"{turn['role']}: {turn['content']}")
+            return '\n'.join(parts)
+
+        messages: List[Dict] = []
+
+        if system_prompt:
+            messages.append({'role': 'system', 'content': system_prompt})
+
+        for turn in self._turns:
+            messages.append({
+                'role': turn['role'],
+                'content': turn['content'],
+            })
+
+        # Both Anthropic and OpenAI share the same message format; we keep
+        # this method open to diverge in the future (e.g. Anthropic tool_use
+        # content blocks, etc.).
+        return messages
+
+    # ------------------------------------------------------------------
+    # Sprint 2.7: Sliding Window Context Management
+    # ------------------------------------------------------------------
+
+    def get_sliding_window(self, max_turns: int = 10) -> List[Dict]:
+        """Return the last *max_turns* turns verbatim.
+
+        This is a lightweight sliding-window view over the turn list.  It
+        does **not** mutate ``_turns`` — use :meth:`compact_older_turns`
+        when you want to summarise or drop older content.
+
+        Args:
+            max_turns: Maximum number of recent turns to include.
+
+        Returns:
+            List of turn dicts ``{"role": ..., "content": ...}``.  Each
+            dict contains at minimum ``role`` and ``content`` keys.
+        """
+        if max_turns <= 0:
+            return []
+        window = self._turns[-max_turns:] if len(self._turns) > max_turns else list(self._turns)
+        return [{'role': t['role'], 'content': t['content']} for t in window]
+
+    def trim_to_budget(self, max_tokens: int) -> int:
+        """Prune section content until total token usage is ≤ *max_tokens*.
+
+        Removes items in priority order (lowest priority first), leaving
+        the most important content intact.  This is a destructive
+        operation — removed items are gone from the window.
+
+        The method targets the window's section content (what feeds token
+        budgets) rather than ``_turns``.  Use :meth:`compact_older_turns`
+        to trim the turn list instead.
+
+        Args:
+            max_tokens: Target maximum token count for the entire window.
+
+        Returns:
+            Number of tokens freed.
+        """
+        current = self.window.get_total_used()
+        if current <= max_tokens:
+            return 0
+
+        tokens_to_free = current - max_tokens
+
+        # Build a flat list of (priority_value, section_name, item) sorted
+        # by ascending priority so we drop the least important items first.
+        PRIORITY_ORDER = {'optional': 0, 'normal': 1, 'important': 2, 'critical': 3}
+
+        candidates: List[Dict] = []
+        for section_name, section_data in self.window.sections.items():
+            section_pri = self._section_priorities.get(section_name, 5)
+            for item in section_data['content']:
+                item_pri = PRIORITY_ORDER.get(item.get('priority', 'normal'), 1)
+                candidates.append({
+                    'section': section_name,
+                    'item': item,
+                    'sort_key': (section_pri, item_pri),
+                    'tokens': item.get('tokens', 0),
+                })
+
+        # Sort ascending — lowest values dropped first
+        candidates.sort(key=lambda c: c['sort_key'])
+
+        to_remove: set = set()
+        freed = 0
+        for cand in candidates:
+            if freed >= tokens_to_free:
+                break
+            to_remove.add(id(cand['item']))
+            freed += cand['tokens']
+
+        # Remove selected items from each section
+        for section_name, section_data in self.window.sections.items():
+            new_content = [
+                item for item in section_data['content']
+                if id(item) not in to_remove
+            ]
+            freed_from_section = section_data['used'] - sum(
+                i.get('tokens', 0) for i in new_content
+            )
+            section_data['content'] = new_content
+            section_data['used'] = max(0, section_data['used'] - freed_from_section)
+
+        return freed
+
+    # ------------------------------------------------------------------
+    # Sprint 12: Section priority management
+    # ------------------------------------------------------------------
+
+    def add_section(
+        self,
+        name: str,
+        content: str,
+        priority: int = 5,
+        budget: Optional[int] = None,
+    ) -> None:
+        """Create (or update) a named section and add *content* to it.
+
+        Sections created here participate in priority-based truncation
+        during :meth:`optimize_context`: low-priority sections are
+        compressed / dropped first when the context is over budget.
+
+        Args:
+            name: Section name (can be any string, including the built-in
+                ``'system'``, ``'memory'``, etc.).
+            content: Content to add.
+            priority: Integer priority (higher = more important, kept longer).
+                Conventional scale: 1 (lowest) – 10 (highest).
+            budget: Optional token budget for the section.  When omitted,
+                uses the section's existing budget (or 0 if new).
+        """
+        # Ensure section exists in the window
+        if name not in self.window.sections:
+            self.window.sections[name] = {'used': 0, 'budget': 0, 'content': []}
+            self.config['section_budgets'][name] = 0
+
+        if budget is not None:
+            self.window.sections[name]['budget'] = budget
+            self.config['section_budgets'][name] = budget
+
+        # Record numeric priority
+        self._section_priorities[name] = priority
+
+        # Add the content
+        self.add_content(name, content)
+
+    # ------------------------------------------------------------------
+    # Internal helpers (Sprint 6 / Sprint 12)
+    # ------------------------------------------------------------------
+
+    def _truncate_turn(self, content: str, max_chars: int = 120) -> str:
+        """Truncate *content* to at most *max_chars* characters.
+
+        This is NOT semantic summarization — use :meth:`set_summarizer` to
+        attach a real summarizer.  Finds a natural sentence/word boundary
+        when possible.
+        """
+        # Strip whitespace and take the first sentence or max_chars
+        text = content.strip()
+        if not text:
+            return ''
+        # Find first sentence boundary
+        for punct in ('. ', '! ', '? '):
+            idx = text.find(punct)
+            if 0 < idx <= max_chars:
+                return text[:idx + 1]
+        if len(text) <= max_chars:
+            return text
+        # Fall back to word boundary
+        snippet = text[:max_chars]
+        space_idx = snippet.rfind(' ')
+        if space_idx > max_chars * 0.6:
+            return snippet[:space_idx] + '…'
+        return snippet + '…'
+
+    def _apply_priority_section_truncation(
+        self, target_utilization: float
+    ) -> tuple:
+        """Drop / compress sections starting from the lowest priority.
+
+        Returns:
+            Tuple of (sections_dropped, sections_compressed, tokens_saved).
+        """
+        target_tokens = int(self.total_budget * target_utilization)
+        current_tokens = self.window.get_total_used()
+
+        if current_tokens <= target_tokens:
+            return 0, 0, 0
+
+        sections_dropped = 0
+        sections_compressed = 0
+        tokens_saved = 0
+
+        # Sort sections by priority ascending (lowest priority first)
+        # Sections without an explicit priority get a default of 5
+        sections_by_priority = sorted(
+            self.window.sections.keys(),
+            key=lambda s: self._section_priorities.get(s, 5),
+        )
+
+        compressor = ImportanceWeightedCompressor(keep_top_n=3, compress_middle=True)
+
+        for section_name in sections_by_priority:
+            if self.window.get_total_used() <= target_tokens:
+                break
+
+            section_data = self.window.sections[section_name]
+            if not section_data['content']:
+                continue
+
+            section_priority = self._section_priorities.get(section_name, 5)
+
+            if section_priority <= 2:
+                # Low-priority: drop entire section
+                freed = section_data['used']
+                section_data['content'] = []
+                section_data['used'] = 0
+                tokens_saved += freed
+                sections_dropped += 1
+            else:
+                # Medium/high-priority: compress using importance weighting
+                result = compressor.compress_items(section_data['content'])
+                new_content = result['kept'] + result['compressed']
+                freed = result['tokens_saved']
+                if freed > 0:
+                    section_data['content'] = new_content
+                    section_data['used'] = sum(
+                        item.get('tokens', 0) for item in new_content
+                    )
+                    tokens_saved += freed
+                    sections_compressed += 1
+
+        return sections_dropped, sections_compressed, tokens_saved

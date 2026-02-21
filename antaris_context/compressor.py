@@ -2,9 +2,16 @@
 Message compression utilities for reducing context size.
 """
 
+import logging
 import re
 from typing import List, Dict, Optional, Tuple
 import json
+
+logger = logging.getLogger(__name__)
+
+# Inputs larger than this trigger a warning. Regex on multi-megabyte strings is
+# safe but can produce measurable CPU time; callers should chunk inputs instead.
+_LARGE_INPUT_WARN_BYTES = 2 * 1024 * 1024  # 2 MB
 
 
 class MessageCompressor:
@@ -67,7 +74,14 @@ class MessageCompressor:
         """
         if not text:
             return text
-            
+
+        if len(text) > _LARGE_INPUT_WARN_BYTES:
+            logger.warning(
+                "compress() received a %.1f MB input — regex passes may be slow. "
+                "Consider chunking large inputs before compressing.",
+                len(text) / 1_048_576,
+            )
+
         original_length = len(text)
         self.stats['original_length'] += original_length
         
@@ -119,7 +133,11 @@ class MessageCompressor:
         
         if len(lines) <= max_lines:
             return output
-            
+
+        # Guard against overlap: if first+last covers all lines, return as-is
+        if keep_first + keep_last >= len(lines):
+            return "\n".join(lines)
+
         # Keep first N and last N lines
         first_part = lines[:keep_first]
         last_part = lines[-keep_last:] if keep_last > 0 else []
@@ -200,10 +218,26 @@ class MessageCompressor:
                 raise ValueError(f"Unknown configuration option: {key}")
     
     def _remove_empty_lines(self, text: str) -> str:
-        """Remove empty lines from text."""
-        lines = text.split('\n')
-        non_empty_lines = [line for line in lines if line.strip()]
-        return '\n'.join(non_empty_lines)
+        """Remove empty lines from text, preserving blank lines inside code fences.
+
+        The naive implementation (filter all lines where ``line.strip()`` is
+        falsy) destroys intentional blank lines inside fenced code blocks,
+        corrupting Python code, docstrings, and any language where blank lines
+        carry semantic meaning.  This version tracks fence state and only
+        removes empty lines outside of fences.
+        """
+        in_fence = False
+        result = []
+        for line in text.split('\n'):
+            stripped = line.strip()
+            # Toggle fence state on opening/closing markers.
+            if stripped.startswith('```') or stripped.startswith('~~~'):
+                in_fence = not in_fence
+            # Inside a fence: keep every line (including intentionally blank ones).
+            # Outside a fence: drop lines that are purely whitespace.
+            if in_fence or stripped:
+                result.append(line)
+        return '\n'.join(result)
     
     def _collapse_whitespace(self, text: str) -> str:
         """Collapse multiple whitespace characters into single spaces."""
@@ -217,10 +251,10 @@ class MessageCompressor:
         """Remove spaces before punctuation and other redundant spacing."""
         # Remove spaces before punctuation
         text = re.sub(r'\s+([,.!?;:])', r'\1', text)
-        # Remove spaces after opening brackets/quotes
-        text = re.sub(r'([\[\(\{"])\s+', r'\1', text)
-        # Remove spaces before closing brackets/quotes
-        text = re.sub(r'\s+([\]\)\}"])', r'\1', text)
+        # Remove spaces after opening brackets (NOT quotes — would mangle JSON/strings)
+        text = re.sub(r'([\[\(\{])\s+', r'\1', text)
+        # Remove spaces before closing brackets (NOT quotes)
+        text = re.sub(r'\s+([\]\)\}])', r'\1', text)
         return text
     
     def _collapse_repeated_patterns(self, text: str) -> str:
@@ -321,15 +355,26 @@ class MessageCompressor:
         return ' '.join(s[2] for s in selected)
     
     def _split_sentences(self, text: str) -> List[str]:
-        """Split text into sentences."""
-        # Simple sentence splitting on periods, exclamations, questions
-        # Handle common abbreviations to avoid false splits
-        text = re.sub(r'\b(Mr|Mrs|Dr|Prof|etc|vs|Inc|Ltd)\.\s*', r'\1<DOT> ', text)
+        """Split text into sentences.
+
+        Uses a null-byte-delimited sentinel (``\\x00DOT\\x00``) to protect
+        abbreviation dots from the sentence splitter.  The previous ``<DOT>``
+        sentinel was a printable string that could appear in technical input
+        (code comments, escaped content, XML), causing incorrect dot restoration.
+        Null bytes cannot appear in valid UTF-8 text, making the sentinel
+        collision-proof.
+        """
+        _ABBREV_SENTINEL = '\x00DOT\x00'
+        text = re.sub(
+            r'\b(Mr|Mrs|Dr|Prof|etc|vs|Inc|Ltd)\.\s*',
+            lambda m: m.group().replace('.', _ABBREV_SENTINEL) + ' ',
+            text,
+        )
         sentences = re.split(r'[.!?]+\s+', text)
-        
+
         # Restore dots in abbreviations
-        sentences = [s.replace('<DOT>', '.') for s in sentences]
-        
+        sentences = [s.replace(_ABBREV_SENTINEL, '.') for s in sentences]
+
         # Clean up and filter empty sentences
         return [s.strip() for s in sentences if s.strip()]
     

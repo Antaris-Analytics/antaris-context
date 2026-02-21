@@ -2,7 +2,7 @@
 Context window management and tracking.
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 import json
 
 
@@ -23,6 +23,21 @@ class ContextWindow:
             'tools': {'used': 0, 'budget': 0, 'content': []}
         }
         self.overflow_warnings = []
+        # Pluggable token estimator — default: ~4 chars per token
+        self._token_estimator: Callable[[str], int] = lambda text: max(1, len(text) // 4)
+
+    def set_token_estimator(self, fn: Callable[[str], int]) -> None:
+        """Replace the default character-based token estimator.
+
+        Args:
+            fn: Callable that accepts a string and returns an integer token
+                count.  Example using tiktoken::
+
+                    import tiktoken
+                    enc = tiktoken.get_encoding("cl100k_base")
+                    cm.window.set_token_estimator(lambda t: len(enc.encode(t)))
+        """
+        self._token_estimator = fn
         
     def set_section_budget(self, section: str, budget: int) -> None:
         """Set token budget for a specific section.
@@ -200,7 +215,7 @@ class ContextWindow:
         """
         if not text:
             return 0
-        return max(1, len(text) // 4)
+        return self._token_estimator(text)
         
     def to_json(self) -> str:
         """Serialize window state to JSON."""

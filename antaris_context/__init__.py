@@ -5,7 +5,7 @@ A lightweight Python library for managing context windows, token budgets,
 and message compression in AI agent applications.
 """
 
-from .manager import ContextManager
+from .manager import ContextManager, MemoryClient
 from .window import ContextWindow
 from .compressor import MessageCompressor
 from .strategy import (
@@ -17,14 +17,21 @@ from .strategy import (
 )
 from .profiler import ContextProfiler
 from .utils import atomic_write_json
+from .importance import (
+    CompressionResult,
+    ImportanceWeightedCompressor,
+    SemanticChunker,
+    SemanticChunk,
+)
 
-__version__ = "1.1.0"
+__version__ = "2.2.0"
 __author__ = "Antaris Analytics"
 __license__ = "Apache 2.0"
 
 __all__ = [
     "ContextManager",
-    "ContextWindow", 
+    "MemoryClient",
+    "ContextWindow",
     "MessageCompressor",
     "ContextStrategy",
     "RecencyStrategy",
@@ -32,5 +39,10 @@ __all__ = [
     "HybridStrategy",
     "BudgetStrategy",
     "ContextProfiler",
-    "atomic_write_json"
+    "atomic_write_json",
+    # Sprint 6
+    "CompressionResult",
+    "ImportanceWeightedCompressor",
+    "SemanticChunker",
+    "SemanticChunk",
 ]

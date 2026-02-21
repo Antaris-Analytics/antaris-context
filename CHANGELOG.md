@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-02-20
+
+### Added — Sprint 2.7: Sliding Window Context + Render Targets
+
+- **`ContextManager.get_sliding_window(max_turns)`** — returns last N turns verbatim as `[{"role": ..., "content": ...}]`; non-mutating view over `_turns`
+- **`ContextManager.trim_to_budget(max_tokens)`** — prunes section content by priority (lowest first) until total token usage ≤ `max_tokens`; returns tokens freed
+- **`ContextManager.render(format="anthropic"|"openai"|"raw")`** — `format` parameter added as a priority-over-`provider` alias
+  - `"anthropic"` / `"openai"` → `[{"role": ..., "content": ...}, ...]` message list (same structure, kept open for future divergence)
+  - `"raw"` → plain string with `role: content` lines joined by newlines
+- 150 existing tests continue to pass (no regressions)
+
+## [2.0.0] - 2026-02-18
+
+### Added — Antaris Suite 2.0 GA
+- **`set_memory_client(client)`** — connects antaris-memory for memory-informed priority boosting during `optimize_context()`
+- **`set_router_hints(hints)`** — accepts router hints from antaris-router; applies section budget shifts and target utilization overrides
+- **`set_summarizer(fn)`** — pluggable semantic summarizer for `compact_older_turns()`
+- **Turn lifecycle** — `add_turn()`, `compact_older_turns()`, `render()`, `set_retention_policy()`, `turn_count`
+- **Section priorities** — `add_section(name, content, priority)`, `_apply_priority_section_truncation()`
+- **Cross-session snapshots** — `export_snapshot(include_importance_above)`, `from_snapshot(dict)` (content-preserving)
+- **`ImportanceWeightedCompressor`** — priority-aware compression; `CompressionResult` with dict and attribute access
+- **`SemanticChunker`** — sentence-boundary-aware chunking with overlap
+- **Sprint 12 render API** — `render(provider='anthropic'|'openai'|'generic')` produces provider-ready message lists
+- 150 unit tests (all passing)
+
 ## [1.1.0] - 2026-02-16
 
 ### Fixed (Claude Review Round 1 + Round 2, GPT-5.2 verified)

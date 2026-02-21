@@ -136,4 +136,5 @@ cython_debug/
 .DS_Store
 
 # Profiler logs
-profiler_*.json
+profiler_*.json*.pyc
+*.pyo
