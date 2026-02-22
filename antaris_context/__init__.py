@@ -24,7 +24,7 @@ from .importance import (
     SemanticChunk,
 )
 
-__version__ = "2.2.0"
+__version__ = "3.1.0"
 __author__ = "Antaris Analytics"
 __license__ = "Apache 2.0"
 
