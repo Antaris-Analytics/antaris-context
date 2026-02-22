@@ -12,6 +12,12 @@
 - **Hybrid Compression** — Try compression on each section. Fall back to uncompressed if compression fails.
 - **Zero Dependencies** — Pure Python stdlib. Safe to import anywhere without version conflicts.
 
+## Phase 4 Roadmap
+
+**v3.2:** Adaptive compression based on available tokens (auto-tune compression level)  
+**v4.0:** Cold vs warm session awareness (inject more context on first turn, less mid-conversation)  
+**v4.1+:** Semantic importance scoring (memories that matter more semantically get protected first)
+
 Manage context windows, token budgets, turn lifecycle, and message compression without external dependencies. Integrates with `antaris-memory` for memory-informed priority boosting and `antaris-router` for adaptive budget allocation. Built for production AI agent systems that need deterministic, configurable context management.
 
 [![PyPI](https://img.shields.io/pypi/v/antaris-context)](https://pypi.org/project/antaris-context/)
