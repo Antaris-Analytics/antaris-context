@@ -2,6 +2,16 @@
 
 **Zero-dependency context window optimization for AI agents.**
 
+**v3.1.0** — Budget-aware compression • Compaction integration • Lossless prioritization • 8 source files • 150 tests**
+
+## What's New in v3.1.0
+
+- **Budget-Aware Compression** — Keep high-priority memories intact; drop lowest-value items when budget exceeded. Never silently truncate mid-entry.
+- **Compaction Integration** — Context state injected cleanly post-compaction. Full conversation continuity even after session reset.
+- **Lossless Prioritization** — Every context item carries importance + urgency. System respects your priorities.
+- **Hybrid Compression** — Try compression on each section. Fall back to uncompressed if compression fails.
+- **Zero Dependencies** — Pure Python stdlib. Safe to import anywhere without version conflicts.
+
 Manage context windows, token budgets, turn lifecycle, and message compression without external dependencies. Integrates with `antaris-memory` for memory-informed priority boosting and `antaris-router` for adaptive budget allocation. Built for production AI agent systems that need deterministic, configurable context management.
 
 [![PyPI](https://img.shields.io/pypi/v/antaris-context)](https://pypi.org/project/antaris-context/)
